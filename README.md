@@ -3,8 +3,9 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/dsh-plugin-ready-4B32C3)](https://github.com/topics/dsh-plugin)
 
-handles planning / architecture / review**, while a **cheap tier (deepseek-v4-flash by
-default) handles day-to-day implementation**, with per-tier fallback chains and
+**A strong tier (deepseek-v4-pro by default) handles planning / architecture /
+review**, while a **cheap tier (deepseek-v4-flash by default) handles
+day-to-day implementation**, with per-tier fallback chains and
 task-intensity reasoning effort. Inspired by Claude Code's `/advisor`
 (consult a stronger model for hard decisions) and `opusplan` (strong model in plan mode,
 cheap model for execution), implemented on DeepSeek Harness through its official seams,
@@ -45,10 +46,10 @@ sequenceDiagram
     participant A as Strong v4-pro
     participant C as Cheap v4-flash
     U->>S: /tier plan (enter plan mode)
-    S->>S: write header -> strong
+    S->>S: agent/request waterfall -> strong config
     S->>A: planning / architecture / design
     U->>S: approve plan, leave plan mode
-    S->>S: write header -> cheap
+    S->>S: agent/request waterfall -> cheap config
     S->>C: routine implementation
     S->>A: tier_advisor (hard decisions) / tier_review (final review)
     Note over S,C: high-impact actions (rm -rf / credential files) are denied by the guard until the strong tier is selected
@@ -57,14 +58,16 @@ sequenceDiagram
 ## Features
 
 - **Automatic tiered routing (auto mode, opusplan-style)**: steps run on the strong tier
-  while plan mode is active and on the cheap tier during execution. Before a loop
-  builds its first or resumed request, the router synchronizes the agent's model
-  options and durable `request/header`; later route changes preserve unrelated
-  request settings such as `maxTokens`.
+  while plan mode is active and on the cheap tier during execution. On DSH 0.2 the
+  `agent/request` waterfall returns the routed config for every model call, so the
+  switch applies to the current step; on older runtimes the legacy header-write
+  strategy applies from the next one. Route changes preserve unrelated request
+  settings such as `maxTokens`.
 - **Per-session scoping**: `/tier strong|cheap|auto|delegated|off` affects **only the current
   session**; other sessions in the process keep their own tier (global default `auto`).
-  In `delegated` mode the main session stays on its model-picker selection while only
-  subagents use tier routing; `/tier auto` remains an explicit per-session override.
+  In `delegated` mode the main session keeps its baseline model (the config the
+  session's first request was built with) while only subagents use tier routing;
+  `/tier auto` remains an explicit per-session override.
   Sessions that should not be managed can opt out with a single `/tier off`.
 - **On-demand advice (advisor-style)**: the `/advisor <question>` command and the
   `tier_advisor` tool hand one decision question plus gathered evidence to the strong
@@ -77,8 +80,9 @@ sequenceDiagram
   60s) temporarily escalate the session to the strong tier (default 180s), expiring via
   TTL; sessions in `off` mode never escalate.
 - **Configurable tiers (durable)**: `/tier set <strong|main|cheap> <provider> <model> [effort]` or the
-  `tier_configure` tool can point each tier at any registered provider/model, configure
-  the strong and main tiers to follow the session selection, and set ordered fallback chains.
+  `tier_configure` tool can point each tier at any registered provider/model and set
+  ordered fallback chains. Tier models come only from the plugin configuration —
+  the DSH session model picker is never consulted for routing.
 - **Two independent switches**: `/tier layout <two|three>` (three adds a `main` tier: plan mode runs
   on main, execution on cheap, and strong becomes the escalation tier; two is the default), and
   `/tier roles <on|off>` (advisor and reviewer get their own models via `/tier set advisor|reviewer`;
@@ -112,8 +116,6 @@ sequenceDiagram
   undeclared level is substituted, and a model that declares no reasoning support (many
   OpenRouter routes) receives no `reasoningEffort` at all, so a request never fails with
   `UNSUPPORTED_REASONING_EFFORT`.
-
-  (pass `sessionOnly: true` for a transient change).
 - **High-impact escalation gate (deterministic guard)**: while the cheap tier executes,
   `tools/pre-execute` denies high-impact tool calls and requires switching to the strong
   tier first — no reliance on model self-discipline. Guard rules (pure logic in
@@ -305,12 +307,19 @@ Sample output (`/tier status`):
 
 ```
 Tiered model routing
-  mode: global=auto, this session=auto (per-session via /tier strong|cheap|auto|delegated|off; escalate: 2 errors / 60s window -> 180s strong)
-  strong: deepseek-official/deepseek-v4-pro (max)
-  cheap:  deepseek-official/deepseek-v4-flash (low)
-  subagents: inherit
-  diag: requestSteps=42 guardChecks=31 guardDenies=3 headerWrites=4 errorsSeen=0 escalations=0
-  session default: deepseek-official/deepseek-v4-pro (max)
+  prompt mode: standard (standard = full guidance in the system prompt; pi = minimal prompt, heavy guidance on demand)
+  mode: global=auto, this session=auto (per-session via /tier strong|main|cheap|auto|delegated|off|smart; escalate: 2 errors / 60s window -> 180s strong)
+  layout: two tiers (strong = plan mode, cheap = execution); /tier layout three enables main
+  strong: deepseek-official/deepseek-v4-pro (max); fallback: deepseek-official/deepseek-v4-pro@max
+  cheap:  deepseek-official/deepseek-v4-flash (low); fallback: none
+  roles: off (advisor and reviewer use the strong route; /tier roles on enables their own routes)
+  decision model: off (deterministic policy is the fallback; set decisionModel + decisionStages to enable)
+  config persisted: yes (host entry "tier-routing", writable)
+  subagents: inherit (spawn: default, fork: default)
+  routing seam: waterfall
+  seams: all ok
+  diag: requestSteps=42 guardChecks=31 guardDenies=3 headerWrites=4 inboxSeen=7 planFlips=1 errorsSeen=0 escalations=0 fallbacks=0 effortRaises=0 decisionCalls=0 decisionHits=0 decisionErrors=0 decisionSkips=0
+  models come only from plugin config (host entry tiers; the DSH session picker is ignored)
   providers: deepseek-official, opencode-go, minimax
 ```
 
@@ -324,6 +333,7 @@ Tiered model routing
 | `tier_configure` | Reconfigure a tier (strong/main/cheap) or a role (advisor/reviewer) provider/model/effort, and the subagent policy |
 | `tier_sidekick` | Smart-mode delegation: spawn a staged subagent (`explore`/`implement`/`fix`) on the stage model with TurboQuant cache injection |
 | `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / agentPreset / maxDepth / background |
+| `tier_escalate_effort` | Raise the cheap tier's reasoning effort one step (low → medium → high → max), bounded by the model's declared efforts |
 | `tier_status` | Read-only diagnostics: global & session tiers, escalation state, listener counters, effective tier |
 
 ## Configuration
@@ -343,6 +353,14 @@ back to in-memory configuration and `/tier status` says so honestly.
 pass `persist: true` to also write the session default model (`agent-default-model`).
 Failure auto-escalation parameters (threshold / window / TTL) are currently built-in
 constants; configurable in a later version.
+
+The decision-model stage has no slash commands — it is configured entirely through
+volatile fields on the host `tier-routing` entry (the plugin's WebUI settings page):
+`decisionModel`, `decisionBaseUrl`, `decisionPath`, `decisionApiKey`,
+`decisionStages` (`guard|escalate|worker|consult`), `decisionApproveAt`,
+`decisionBlockAt`, `decisionTimeoutMs`, `decisionBudgetPerTurn`. Empty
+`decisionModel` (the default) disables every stage and produces zero network
+traffic. `/tier status` prints the live decision line and counters.
 
 ## Tests
 

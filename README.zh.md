@@ -5,7 +5,8 @@
 
 按任务难度分层路由模型：**强档（默认 deepseek-v4-pro）负责规划 / 架构 / 评审**，
 **弱档（默认 deepseek-v4-flash）负责日常编码实现**，并支持每档回退链与按任务强度
-自动选择思考强度。灵感来自 Claude Code 的
+自动选择思考强度。灵感来自 Claude Code 的 `/advisor`（困难决策咨询更强模型）与
+`opusplan`（计划模式用强模型、执行用弱模型），
 在 DeepSeek Harness 里用官方机制实现，并扩展了难度升级门、失败自动升级与 subagent 分层。
 
 [English](README.md) · 中文
@@ -41,10 +42,10 @@ sequenceDiagram
     participant A as 强档 v4-pro
     participant C as 弱档 v4-flash
     U->>S: /tier plan（进入计划模式）
-    S->>S: 写 header → strong
+    S->>S: agent/request 瀑布 → strong 配置
     S->>A: 规划 / 架构 / 设计方案
     U->>S: 批准计划，退出计划模式
-    S->>S: 写 header → cheap
+    S->>S: agent/request 瀑布 → cheap 配置
     S->>C: 日常编码实现
     S->>A: tier_advisor（困难决策）/ tier_review（收尾评审）
     Note over S,C: 高危操作（rm -rf / 凭据文件）被守卫拦截，要求先切强档
@@ -53,12 +54,12 @@ sequenceDiagram
 ## 功能
 
 - **自动分层路由（auto 模式，opusplan 式）**：进入计划模式时步骤跑强档，执行步骤跑弱档。
-  在 agent loop 构建首个或恢复后的请求前，路由器会同步 agent 的模型 options 与持久化
-  `request/header`；后续切换会保留 `maxTokens` 等无关请求配置。
+  DSH 0.2 的 `agent/request` 瀑布对每个模型调用返回路由配置，切换当步生效；旧运行时
+  自动降级为写 header 的兼容策略（下一步生效）。切换会保留 `maxTokens` 等无关请求配置。
 - **按会话隔离（per-session）**：`/tier strong|cheap|auto|delegated|off` 只影响当前会话，
-  **进程内其他会话保持自己的档位**（全局默认 `auto`）。`delegated` 模式下主会话保持模型
-  选择器的选项，只有子代理使用分层路由；`/tier auto` 仍是显式的本会话覆盖。不想被管理的
-  会话发一次 `/tier off` 即可退出。
+  **进程内其他会话保持自己的档位**（全局默认 `auto`）。`delegated` 模式下主会话保持其
+  基线模型（首个请求捕获的会话配置），只有子代理使用分层路由；`/tier auto` 仍是显式的
+  本会话覆盖。不想被管理的会话发一次 `/tier off` 即可退出。
 - **按需咨询（advisor 式）**：`/advisor <问题>` 命令 + `tier_advisor` 工具，把一个问题
   加已有证据交给强档模型，返回建议 / 证据 / 风险 / 验收条件；实现仍由当前档执行。
 - **评审阶段**：`tier_review` 工具 + `/tier review <焦点>`，强档模型对变更与验证结果
@@ -75,11 +76,11 @@ sequenceDiagram
   使用各自模型；关闭时走强档路由）。角色没有自己的降级链，回退到强档降级链。审查时若与执行者同
   家族，`/tier status` 会给出警告。
 - **可配置双档（持久化）**：`/tier set <strong|main|cheap> <provider> <model> [effort]` 或
-  `tier_configure` 工具可修改任意已注册 provider / model、让强档与主档跟随会话模型选择，并配置
-  有序回退链。配置持久化在 host 级 `tier-routing` profile 条目上，重启不丢；
-  传 `sessionOnly: true` 可只改内存。
+  `tier_configure` 工具可修改任意已注册 provider / model 并配置有序回退链。各档模型
+  完全由插件配置决定——DSH 会话选择器不参与路由。配置持久化在 host 级 `tier-routing`
+  profile 条目上，重启不丢；传 `sessionOnly: true` 可只改内存。
 - **WebUI 设置页**：host `tier-routing` 条目的全部 volatile 字段（模式、provider、模型、
-  思考强度、跟随会话、回退链、子代理策略）由 DSH 自动生成设置页并持久化，
+  思考强度、回退链、子代理策略）由 DSH 自动生成设置页并持久化，
   不再需要手写 `client/client.js`（已移除）。
 - **seam 自诊断**：启动时探测所有用到的 DSH 服务与事件；`/tier status` 报告当前
   路由策略（`waterfall`/`header`）与缺失能力。某个 seam 缺失只会让对应功能降级，
@@ -115,6 +116,22 @@ sequenceDiagram
    以 4-bit 向量（每条 256 字节）持久化到 `.dsh-turbovec-cache.json`
    （走 `ctx.fs`，不可写时退回内存）。`tier_sidekick` 检索片段并注入提示词。
    `/tier cache status|clear|search <query>`。
+- **决策模型阶段（Jev / System One / OpenRouter Decisions）**：可选的
+  `lib/dsh/decisions.js` 客户端向 OpenRouter Decisions API（`/api/alpha/decisions`，
+  base URL 与路径可配，任意 Jev 兼容端点均可）POST `{state, questions}`
+  （noul/choice/score）。模型 id 是配置项而非代码：Jev、Perplexity Decider、Clef、
+  Drex 等不改代码即可互换。按阶段开关 `decisionStages`（`guard`、`escalate`、
+  `worker`、`consult`）：
+  - `guard` — 高危拦截的二级分类：只有全部 noul 问题（`reversible`、
+    `within_project`、`serves_task`）都明确 approve 才能推翻确定性 deny，其余一律
+    维持拦截（fail-closed）。
+  - `escalate` — 步骤失败的三级分流（`model_fault`）：高置信「非模型能力问题」会
+    阻止自动升级到强档。
+  - `worker` — `tier_worker` / `tier_sidekick` 未指定档位时挑选执行档（带置信度门限）。
+  - `consult` — 门控 `tier_advisor` / `tier_review` / plan-exit 顾问评审：高置信
+    「无需咨询」直接跳过高价强档调用。
+  每轮预算、响应缓存（相同状态 60s 复用）与阈值（`approveAt`/`blockAt`）均可配置；
+  无 key / 出错时回落到确定性策略。永不进入每请求热路径。
 - **Digest 卡片 + 稳定前缀（v0.8.1）**：每个完成的 sidekick 阶段写入记忆卡片
    （diffSummary/checks/issues，每阶段上限 8），同阶段后续调用会作为
    `Previous outcomes (memory):` 注入。提示词使用固定的阶段前缀组装，使重复调用
@@ -225,12 +242,19 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
 
 ```
 Tiered model routing
-  mode: global=auto, this session=auto (per-session via /tier strong|cheap|auto|delegated|off; escalate: 2 errors / 60s window -> 180s strong)
-  strong: deepseek-official/deepseek-v4-pro (max)
-  cheap:  deepseek-official/deepseek-v4-flash (low)
-  subagents: inherit
-  diag: requestSteps=42 guardChecks=31 guardDenies=3 headerWrites=4 errorsSeen=0 escalations=0
-  session default: deepseek-official/deepseek-v4-pro (max)
+  prompt mode: standard (standard = full guidance in the system prompt; pi = minimal prompt, heavy guidance on demand)
+  mode: global=auto, this session=auto (per-session via /tier strong|main|cheap|auto|delegated|off|smart; escalate: 2 errors / 60s window -> 180s strong)
+  layout: two tiers (strong = plan mode, cheap = execution); /tier layout three enables main
+  strong: deepseek-official/deepseek-v4-pro (max); fallback: deepseek-official/deepseek-v4-pro@max
+  cheap:  deepseek-official/deepseek-v4-flash (low); fallback: none
+  roles: off (advisor and reviewer use the strong route; /tier roles on enables their own routes)
+  decision model: off (deterministic policy is the fallback; set decisionModel + decisionStages to enable)
+  config persisted: yes (host entry "tier-routing", writable)
+  subagents: inherit (spawn: default, fork: default)
+  routing seam: waterfall
+  seams: all ok
+  diag: requestSteps=42 guardChecks=31 guardDenies=3 headerWrites=4 inboxSeen=7 planFlips=1 errorsSeen=0 escalations=0 fallbacks=0 effortRaises=0 decisionCalls=0 decisionHits=0 decisionErrors=0 decisionSkips=0
+  models come only from plugin config (host entry tiers; the DSH session picker is ignored)
   providers: deepseek-official, opencode-go, minimax
 ```
 
@@ -244,6 +268,7 @@ Tiered model routing
 | `tier_configure` | 重配任意档位的 provider/model/effort 与 subagent 策略 |
 | `tier_sidekick` | smart 模式委托：按阶段（`explore`/`implement`/`fix`）派生子代理，注入 TurboQuant 缓存片段 |
 | `tier_worker` | 按档派发子代理执行有界任务包；支持 outputSchema / agentPreset / maxDepth / background |
+| `tier_escalate_effort` | 弱档思考强度上调一档（low → medium → high → max），不超过模型声明的上限 |
 | `tier_status` | 只读诊断：全局与本会话档位、升级状态、监听器计数器、生效档位 |
 
 ## 配置
@@ -260,6 +285,13 @@ Tiered model routing
 `/tier status` 会如实提示。`tier_route strong|cheap|delegated` 只影响当前会话
 且默认不持久化，传 `persist: true` 才写入会话默认模型（`agent-default-model`）。
 失败自动升级参数（阈值 / 窗口 / 时长）当前为内建常量，后续版本可配置化。
+
+决策模型没有斜杠命令——完全通过 host `tier-routing` 条目的 volatile 字段
+（插件的 WebUI 设置页）配置：`decisionModel`、`decisionBaseUrl`、`decisionPath`、
+`decisionApiKey`、`decisionStages`（`guard|escalate|worker|consult`）、
+`decisionApproveAt`、`decisionBlockAt`、`decisionTimeoutMs`、`decisionBudgetPerTurn`。
+`decisionModel` 留空（默认）时所有阶段关闭，零网络流量；`/tier status` 会显示
+决策模型行与实时计数器。
 
 ## 测试
 
@@ -299,6 +331,13 @@ harness 适配层（服务探测、路由 seam 策略、subagent/jobs 适配、s
 DSH 0.2 的 `agent/request` 瀑布让切档作用于下一个模型调用——没有一步延迟。
 若 `/tier status` 显示 `routing seam: header`（旧运行时），则从下一步生效。
 
+**Q: 开了 smart 模式，但日志里只有我常用的（廉价）会话模型？**
+这是旧的 follow-session 行为，已移除：强档与主档现在总是跑插件配置里的
+provider/model（host `tier-routing` 条目），DSH 会话选择器不参与路由。若规划档
+仍在调用廉价模型，请改档位配置（`/tier set strong <provider> <model> [effort]`）；
+`/tier status` 会打印生效路由（`smart: main agent pinned to strong; effective
+route now: ...`）。
+
 **Q: 想用订阅渠道的模型（如 OpenCode Go / MiniMax）？**
 先 `/tier models` 确认 provider 已注册、模型已配置，再
 `/tier set cheap opencode-go deepseek-v4-flash`。pi-ai 类 provider 必须在
@@ -329,12 +368,6 @@ host 层 `tier-routing` 行只承载设置页。切换 preset 后新开会话，
   未来可在交给强档前弹确认。
 - **新咨询类型**：`lib/core/consult.js` 是注册表——advisor/review 是条目，未来加
   delegate/diff-review 无需新管线。
-- **决策模型适配器（Jev / Clef / OpenRouter Decisions）**：计划中的可选
-  `lib/dsh/decisions.js`，向 OpenRouter Decisions API（`/api/alpha/decisions`）
-  或任意 Jev 兼容端点（如自托管 `laya-server`）POST `{state, questions}`
-  （noul/choice/score）；模型 id 是配置字段，Jev、Perplexity Decider、Clef、Drex
-  等不改代码即可互换。目标用途：`ask` 策略动作、guard 二级分类、`tier_worker`/
-  consult 的选档——不用于每请求热路径。无 key/endpoint 时静默回落到确定性策略。
 
 ## 许可
 

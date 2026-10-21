@@ -80,7 +80,7 @@ every model request:
         │        explicitTier (tier_worker) > off > delegated-main >
         │        escalated > sessionMode > subagentPolicy > auto(plan?strong:cheap)
         │     effectiveTarget(agent, tier):
-        │        active fallback chain entry? → chain target (chainFor: explicit pair first when followed)
+        │        active fallback chain entry? → chain target (chainFor: configured entries only)
         │        strong/main → explicit tier config (plugin settings only)
         │        cheap                      → cheap config + raised effort (if any)
         │     tierNameFor → planActive ? (three tiers: main, two: strong) : cheap
@@ -164,9 +164,9 @@ Defaults: strong = `deepseek-official/deepseek-v4-pro@max` with
 chain; roles off with no models; `subagentPolicy: 'inherit'`; `mode: 'auto'`.
 
 **Chains.** `chainFor(tier)` is the one fallback list every path uses (request
-waterfall, request-error retries, `/tier status`, consultations). When the tier
-follows the session model, its explicit pair is the first entry, deduplicated
-against the configured chain. Consultations walk `consultAttempts(role)`: the
+waterfall, request-error retries, `/tier status`, consultations) — since
+v0.10.1 it contains only the configured entries; the DSH session model picker
+is never consulted for routing. Consultations walk `consultAttempts(role)`: the
 role route when roles are on, then the strong route and its chain.
 
 ## 6. Tools and commands
