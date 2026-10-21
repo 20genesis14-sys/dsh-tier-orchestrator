@@ -12,6 +12,11 @@ import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/cor
 import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS } from '../lib/core/turbovec.js'
 import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
 import { decideAdvisorBudget } from '../lib/core/policy.js'
+import {
+  noulQuestion, choiceQuestion, scoreQuestion, buildGuardQuestions, buildTierQuestion,
+  buildEscalationQuestion, buildConsultQuestion, buildDecisionState, parseDecisionAnswers,
+  decideByThresholds, decisionKey, isDecisionStageEnabled, DECISION_STAGES,
+} from '../lib/core/decision.js'
 import { softParseSections } from '../lib/core/consult.js'
 
 // ---- rm -rf detection (including split flags) -----------------------------
@@ -191,16 +196,14 @@ test('migrateTierConfig fills defaults and migrates legacy entries', () => {
   const d = migrateTierConfig('cheap', null)
   assert.equal(d.provider, 'deepseek-official')
   assert.equal(d.model, 'deepseek-v4-flash')
-  assert.equal(d.followSession, false)
   const legacy = migrateTierConfig('strong', { provider: 'x', model: 'y', reasoningEffort: 'high' })
-  assert.equal(legacy.followSession, true)
   assert.deepEqual(legacy.fallback, [{ provider: 'x', model: 'y', reasoningEffort: 'high' }], 'legacy config mirrors primary as the fallback')
   const explicit = migrateTierConfig('cheap', { provider: 'x', model: 'y', reasoningEffort: 'low', fallback: [] })
   assert.deepEqual(explicit.fallback, [], 'empty array is a real chain, not legacy')
 })
 
-test('defaults: strong follows session, cheap is deepseek-v4-flash at low effort', () => {
-  assert.equal(DEFAULT_TIER_CONFIG.strong.followSession, true)
+test('defaults: strong is deepseek-v4-pro at max, cheap is deepseek-v4-flash at low effort', () => {
+  assert.equal(DEFAULT_TIER_CONFIG.strong.model, 'deepseek-v4-pro')
   assert.equal(DEFAULT_TIER_CONFIG.cheap.model, 'deepseek-v4-flash')
   assert.equal(DEFAULT_TIER_CONFIG.cheap.reasoningEffort, 'low')
   assert.deepEqual(EFFORT_LADDER, ['low', 'medium', 'high', 'max'])
@@ -342,8 +345,9 @@ test('three tiers: plan runs on main, strong is reached by escalation or a pin',
   assert.equal(resolveTierSpec({ ...SPEC_BASE, planActive: true, tiers: ['strong', 'cheap'] }), 'strong', 'two tiers: plan stays on strong')
 })
 
-test('main defaults follow the session model at high effort', () => {
-  assert.equal(DEFAULT_TIER_CONFIG.main.followSession, true)
+test('main defaults to deepseek-v4-pro at high effort', () => {
+  assert.equal(DEFAULT_TIER_CONFIG.main.model, 'deepseek-v4-pro')
+  assert.equal(DEFAULT_TIER_CONFIG.main.followSession, undefined)
   assert.equal(migrateTierConfig('main', null).reasoningEffort, 'high')
 })
 
@@ -357,7 +361,8 @@ test('tier registry orders strong first and cheap last', () => {
   assert.equal(tierLabel(reg.get('cheap')), 'x/y (high)')
   assert.equal(chainText(reg.get('cheap')), 'x/y@high')
   const snap = reg.snapshot()
-  assert.equal(snap.strong.followSession, true)
+  assert.equal(snap.strong.followSession, undefined)
+  assert.equal(snap.strong.model, 'deepseek-v4-pro')
 })
 
 // ---- turbovec: local embedding + 4-bit TurboQuant index -------------------
@@ -791,4 +796,83 @@ test('softParseSections edge cases: empty input, empty sections, partial JSON', 
   const broken = '{ "risks": [unclosed'
   const b = softParseSections(broken, ['risks'])
   assert.ok(b, 'never throws')
+})
+
+// ---- decision-model primitives (Jev / System One / OpenRouter Decisions) ----
+
+test('question builders emit the expected wire shapes', () => {
+  const n = noulQuestion('is it safe?')
+  assert.equal(n.type, 'noul')
+  assert.equal(n.instructions, 'is it safe?')
+  const c = choiceQuestion('pick one', { cheap: 'cheap tier', strong: 'strong tier' })
+  assert.equal(c.type, 'choice')
+  assert.deepEqual(c.criteria, { cheap: 'cheap tier', strong: 'strong tier' })
+  const s = scoreQuestion('rate x')
+  assert.equal(s.type, 'score')
+})
+
+test('buildGuardQuestions drops serves_task without task and within_project without project', () => {
+  const full = buildGuardQuestions({ commands: ['rm -rf x'], project: '/work', task: 'clean up' })
+  assert.ok(full.reversible)
+  assert.ok(full.within_project)
+  assert.ok(full.serves_task)
+  const noTask = buildGuardQuestions({ commands: ['rm -rf x'], project: '/work' })
+  assert.ok(noTask.reversible)
+  assert.ok(noTask.within_project)
+  assert.equal(noTask.serves_task, undefined)
+  const bare = buildGuardQuestions({ commands: ['rm -rf x'] })
+  assert.ok(bare.reversible)
+  assert.equal(bare.within_project, undefined)
+  assert.equal(bare.serves_task, undefined)
+})
+
+test('parseDecisionAnswers accepts a valid noul answer and returns probabilities', () => {
+  const questions = { reversible: noulQuestion('reversible?') }
+  const res = parseDecisionAnswers({ answers: { reversible: { type: 'noul', noul: 0.95 } } }, questions)
+  assert.equal(res.ok, true)
+  assert.equal(res.values.reversible, 0.95)
+  assert.equal(res.probabilities.reversible, 0.95)
+})
+
+test('parseDecisionAnswers is strict: missing/malformed answers are errors, never zeros', () => {
+  const questions = { a: noulQuestion('a?'), b: noulQuestion('b?') }
+  assert.equal(parseDecisionAnswers({ answers: { a: { type: 'noul', noul: 0.9 } } }, questions).ok, false)
+  assert.equal(parseDecisionAnswers({ answers: { a: { type: 'noul', noul: 0.9 }, b: { type: 'noul', noul: 1.5 } } }, questions).ok, false)
+  assert.equal(parseDecisionAnswers({ answers: { a: { type: 'noul', noul: -0.1 }, b: { type: 'noul', noul: 0.5 } } }, questions).ok, false)
+  assert.equal(parseDecisionAnswers(null, questions).ok, false)
+  assert.equal(parseDecisionAnswers('not json', questions).ok, false)
+  assert.equal(parseDecisionAnswers({}, questions).ok, false)
+})
+
+test('parseDecisionAnswers validates choice criteria and confidence', () => {
+  const questions = { tier: choiceQuestion('which?', { cheap: 'c', strong: 's' }) }
+  const ok = parseDecisionAnswers({ answers: { tier: { type: 'choice', choice: 'strong', confidence: 0.8 } } }, questions)
+  assert.equal(ok.ok, true)
+  assert.equal(ok.values.tier, 'strong')
+  assert.equal(ok.probabilities.tier, 0.8)
+  const unknown = parseDecisionAnswers({ answers: { tier: { type: 'choice', choice: 'main' } } }, questions)
+  assert.equal(unknown.ok, false)
+})
+
+test('decideByThresholds maps probabilities to approve/block/review/unknown', () => {
+  assert.equal(decideByThresholds({ a: 0.95, b: 0.99 }), 'approve')
+  assert.equal(decideByThresholds({ a: 0.05 }), 'block')
+  assert.equal(decideByThresholds({ a: 0.7 }), 'review')
+  assert.equal(decideByThresholds({}), 'unknown')
+  assert.equal(decideByThresholds(null), 'unknown')
+  assert.equal(decideByThresholds({ a: NaN }), 'unknown')
+})
+
+test('decisionKey is stable across object key orders', () => {
+  const a = decisionKey({ tier: 'cheap', task: 'x', commands: ['a', 'b'] })
+  const b = decisionKey({ commands: ['a', 'b'], task: 'x', tier: 'cheap' })
+  assert.equal(a, b)
+  assert.notEqual(a, decisionKey({ tier: 'cheap', task: 'x', commands: ['a'] }))
+})
+
+test('isDecisionStageEnabled respects the configured stage list', () => {
+  assert.equal(isDecisionStageEnabled(['guard', 'escalate'], 'guard'), true)
+  assert.equal(isDecisionStageEnabled(['guard'], 'worker'), false)
+  assert.equal(isDecisionStageEnabled(undefined, 'guard'), false)
+  assert.deepEqual(DECISION_STAGES, ['guard', 'escalate', 'worker', 'consult'])
 })

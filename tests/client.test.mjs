@@ -152,7 +152,7 @@ test('the tier form exposes the layout and roles switches, the main tier and bot
     loadCatalog() {}, refreshCatalog() {}, edit() {}, resetField() {}, save() {}, discard() {},
   })
   const fields = element.children.map((child) => child.props && (child.props.fieldKey || child.props.tier)).filter(Boolean)
-  for (const key of ['threeTiers', 'mainFollowSession', 'mainFallback', 'rolesEnabled', 'main', 'advisor', 'reviewer', 'strong', 'cheap', 'subagentPolicy', 'spawnPolicy', 'forkPolicy', 'planMinExplore', 'planAdvisorGate', 'sidekickExplore', 'sidekickImplement', 'sidekickFix', 'advisorMaxCallsPerTurn', 'advisorConfirmTimeoutSec', 'forceTierOnExplicitModel']) {
+  for (const key of ['threeTiers', 'mainFallback', 'rolesEnabled', 'main', 'advisor', 'reviewer', 'strong', 'cheap', 'subagentPolicy', 'spawnPolicy', 'forkPolicy', 'planMinExplore', 'planAdvisorGate', 'sidekickExplore', 'sidekickImplement', 'sidekickFix', 'advisorMaxCallsPerTurn', 'advisorConfirmTimeoutSec', 'forceTierOnExplicitModel']) {
     assert.ok(fields.includes(key), 'form renders ' + key)
   }
 })

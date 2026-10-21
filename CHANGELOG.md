@@ -2,6 +2,50 @@
 
 All notable changes to dsh-tier-orchestrator are documented here.
 
+## [0.10.1] - 2026-11-02
+
+### Changed
+
+- **Removed follow-session.** Strong/main/cheap tiers are now always driven by the
+  plugin configuration (host 	ier-routing entry, /tier set, 	ier_configure);
+  the DSH session model picker is never consulted for routing. The ollowSession/
+  cheapFollowSession/mainFollowSession volatile fields, the /tier set <strong|main>
+  follow-session form, and the 	ier_configure ollowSession parameter are gone.
+  /tier status shows the effective route in smart mode (smart: main agent pinned to
+  <tier>; effective route now: ...); the session default line was replaced by a
+  note that models come only from plugin config. The advisor/reviewer routes and the
+  fallback chains are likewise config-only. Legacy profiles with the old fields load
+  cleanly (the fields are ignored).
+
+## [0.10.0] - 2026-11-01
+
+### Added
+
+- **Decision-model stages (Jev / System One / OpenRouter Decisions).** An
+  opt-in `lib/dsh/decisions.js` transport posts `{state, questions}`
+  (noul/choice/score) to the OpenRouter Decisions API (`/api/alpha/decisions`,
+  configurable base URL/path — any Jev-compatible endpoint works); the model
+  id is a volatile config field, so Jev, Perplexity Decider, Clef, Drex etc.
+  are interchangeable without code changes. Stages enabled via
+  `decisionStages`: `guard` second-stage classification of high-impact denials
+  (only a full approve overrides; fail-closed), `escalate` failure triage
+  (`model_fault` blocks the automatic escalation on a confident "not a model
+  fault"), `worker` tier choice for `tier_worker`/`tier_sidekick` when no tier
+  is specified, and `consult` gating of advisor/review/plan-exit consultations
+  (a confident "no consult needed" skips the strong-tier call). Configurable
+  per-turn budget, response cache (60s TTL), and approve/block thresholds; the
+  deterministic policy remains the no-key/no-error fallback. Never on the
+  per-request hot path. `lib/core/decision.js` primitives are now unit-tested;
+  smoke coverage exercises every stage with an injected fetch.
+- **Smart-mode route clarity.** The strong/main tiers follow the session model
+  selection by default, so a cheap session pick makes them call that same
+  model (the log then shows no strong/main model id even in smart mode).
+  `/tier status` now prints the effective smart route (`smart: main agent
+  pinned to <tier>; effective route now: ...`), `/tier smart` confirms it,
+  and `/tier set <strong|main> no-follow-session` pins the plan tier to its
+  explicit provider/model instead of following the session selection. The
+  system prompt explains both.
+
 ## [0.9.0] - 2026-10-21
 
 ### Added

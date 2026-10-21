@@ -213,7 +213,7 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
 /tier gate advisor <on|off>                 # 计划提交前由顾问先评审一次
 /tier gate advisor-limit <n> [timeoutSec]   # 每轮用户对话的免费 tier_advisor 次数；超限需确认
 /tier set <strong|main|cheap|advisor|reviewer> <provider> <model> [effort]
-/tier set <strong|main> follow-session      # 跟随会话模型选择
+# 各档模型完全由插件配置决定；DSH 会话选择器不参与路由
 /tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
                                             # smart 模式各阶段的 sidekick 模型（留空 = 低成本档）
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # 子代理路由；caller 仅用于 fork，capped 不超过主档

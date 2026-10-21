@@ -88,7 +88,7 @@ sequenceDiagram
   Configuration persists on the host-level `tier-routing` profile entry and survives
   restarts (pass `sessionOnly: true` for a transient change).
 - **WebUI settings**: every volatile field of the host `tier-routing` entry (mode,
-  providers, models, reasoning effort, follow-session, fallback chains, subagent policy)
+  providers, models, reasoning effort, fallback chains, subagent policy)
   appears on the plugin's auto-generated settings page in the DSH WebUI and persists
   through the profile patch — no hand-edited files. The former hand-built
   `client/client.js` settings card was removed in favor of this mechanism.
@@ -103,8 +103,7 @@ sequenceDiagram
   every entry to disable fallback. Fallback state is per agent and tier, returns to the
   primary after the fallback TTL (default 5 min, `state.fallbackTtlMs`), and never
   crosses from a cheap chain to a strong chain during a plan transition.
-- **Task-intensity reasoning effort**: the strong tier follows your session model
-  selection by default (`/tier set strong follow-session`); the cheap tier starts at
+- **Task-intensity reasoning effort**: the cheap tier starts at
   `low` and raises itself through `medium`/`high`/`max` (bounded by the model's declared
   efforts) on cheap-tier retry errors, high-impact guard denials, or the
   `tier_escalate_effort` tool; `/tier effort <low|medium|high|max>` sets it manually.
@@ -153,6 +152,27 @@ sequenceDiagram
   (30s timeout) and fails closed without approval. The budget resets on each new user
   message. `forceTierOnExplicitModel` (default off) routes explicit-model subagent
   children by tier rules instead of keeping their seed.
+- **Decision-model stage (Jev / System One / OpenRouter Decisions)**: an opt-in
+  `lib/dsh/decisions.js` client posts `{state, questions}` (noul/choice/score)
+  to the OpenRouter Decisions API (`/api/alpha/decisions`; base URL and path are
+  configurable, so any Jev-compatible endpoint works). The model id is
+  configuration, never code: Jev, Perplexity Decider, Clef, Drex etc. are
+  interchangeable without code changes. Per-stage enable list `decisionStages`
+  (`guard`, `escalate`, `worker`, `consult`):
+  - `guard` — second-stage classification of high-impact denials: only an
+    explicit approve of every noul question (`reversible`, `within_project`,
+    `serves_task`) may override a deterministic deny; anything else keeps the
+    deny (fail-closed, the deterministic pattern stays authoritative).
+  - `escalate` — triage of step failures (`model_fault`): a confident "not a
+    model-capability failure" blocks the automatic strong-tier escalation.
+  - `worker` — picks the execution tier for `tier_worker` / `tier_sidekick`
+    when the caller does not specify one (confidence-gated choice).
+  - `consult` — gates `tier_advisor` / `tier_review` / the plan-exit advisor
+    review: a confident "no consult needed" skips the strong-tier call.
+  Budget (per agent per user turn), response caching (identical states replay,
+  60s TTL), and thresholds (`approveAt`/`blockAt`) are configurable; the
+  deterministic policy remains the no-key/no-error fallback. Never on the
+  per-request hot path.
 - **TurboQuant 4-bit snippet cache**: local code embeddings (d=512, Signed Feature
   Hashing + FWHT) stored as 4-bit vectors (256 bytes each) in a persistent
   `.dsh-turbovec-cache.json` (via `ctx.fs`, in-memory fallback). `tier_sidekick`
@@ -273,7 +293,7 @@ creation; existing sessions keep theirs (DSH behavior).
 /tier gate advisor <on|off>                 # advisor reviews each plan once before you see it
 /tier gate advisor-limit <n> [timeoutSec]   # free tier_advisor calls per user turn; the next one asks for confirmation
 /tier set <strong|main|cheap|advisor|reviewer> <provider> <model> [effort]
-/tier set <strong|main> follow-session      # follow the session model selection
+# tiers are fully configured plugin-side; the DSH session picker never drives routing
 /tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
                                             # per-stage sidekick model for smart mode (blank = cheap tier)
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # subagent route; caller is for fork only, capped never goes above main
@@ -367,6 +387,14 @@ On DSH 0.2 the `agent/request` waterfall applies routing to the very next model
 call — there is no one-step delay. If `/tier status` reports `routing seam:
 header` (older runtime), the switch applies from the next step instead.
 
+**Q: I enabled smart mode but the log only ever shows my ordinary (cheap) session model?**
+That was the old follow-session behavior and has been removed: strong and main
+tiers now always run the provider/model configured in the plugin (host
+`tier-routing` entry), and the DSH session picker is never consulted for
+routing. If the plan tier still calls your cheap model, change the tier config
+(`/tier set strong <provider> <model> [effort]`) — `/tier status` prints the
+effective route (`smart: main agent pinned to strong; effective route now: ...`).
+
 **Q: How do I use subscription-channel models (OpenCode Go / MiniMax)?**
 Run `/tier models` to confirm the provider is registered and its models are configured,
 then `/tier set cheap opencode-go deepseek-v4-flash`. pi-ai-style providers must declare
@@ -406,14 +434,6 @@ session and verify with `/tier status`.
   task to the stronger tier.
 - **New consultation kinds**: `lib/core/consult.js` is a registry — advisor/review are
   entries; `delegate`/`diff-review` entries can be added without new plumbing.
-- **Decision-model adapter (Jev / Clef / OpenRouter Decisions)**: a planned opt-in
-  `lib/dsh/decisions.js` posting `{state, questions}` (noul/choice/score) to the
-  OpenRouter Decisions API (`/api/alpha/decisions`) or any Jev-compatible endpoint
-  (e.g. self-hosted `laya-server`); the model id is a config field, so Jev,
-  Perplexity Decider, Clef, Drex etc. are interchangeable without code changes.
-  Target use: the `ask` policy action, second-stage guard classification, and
-  tier selection for `tier_worker`/`consult` — not the per-request hot path.
-  No key or endpoint → silent fallback to the deterministic policy.
 
 ## License
 

@@ -2,7 +2,7 @@
 // context, runs apply() on the agent plane, and exercises every tool/command/
 // listener path — the agent/request waterfall seam, settings-backed
 // persistence, startActivation subagents, fallback chains, task-intensity
-// effort, followSession strong tier, effort validation.
+// effort, explicit tier config, effort validation.
 // Run with: node --test tests/
 
 import { test } from 'node:test'
@@ -108,12 +108,10 @@ function makeContext(options = {}) {
             strongProvider: 'deepseek-official',
             strongModel: 'deepseek-v4-pro',
             strongEffort: 'max',
-            strongFollowSession: true,
             strongFallback: [{ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }],
             cheapProvider: options.cheapProvider || 'cctq',
             cheapModel: options.cheapModel || 'gpt-5.6-terra',
             cheapEffort: options.cheapEffort || 'medium',
-            cheapFollowSession: false,
             cheapFallback: [{ provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' }],
             subagentPolicy: 'inherit',
           },
@@ -328,13 +326,13 @@ test('auto mode follows the plan/mode fold per request', async () => {
   assert.equal(req.model, 'gpt-5.6-terra')
   main.session.events.push({ type: 'plan/mode', data: { active: true } })
   req = await runRequest(ctx, main)
-  assert.equal(req.model, 'deepseek-v4-pro', 'plan mode routes strong (followSession -> session selection)')
+  assert.equal(req.model, 'deepseek-v4-pro', 'plan mode routes strong (explicit config)')
   main.session.events.push({ type: 'plan/mode', data: { active: false } })
   req = await runRequest(ctx, main)
   assert.equal(req.model, 'gpt-5.6-terra')
 })
 
-test('strong followSession: session selection drives the strong route', async () => {
+test('strong uses its explicit config, never the session picker', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
   services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
@@ -342,7 +340,7 @@ test('strong followSession: session selection drives the strong route', async ()
   const route = services.tools.registered.find((t) => t.name === 'tier_route')
   await route.execute({ tier: 'strong' }, { agent: main, signal: undefined })
   const req = await runRequest(ctx, main)
-  assert.deepEqual({ provider: req.provider, model: req.model, reasoningEffort: req.reasoningEffort }, { provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
+  assert.deepEqual({ provider: req.provider, model: req.model, reasoningEffort: req.reasoningEffort }, { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }, 'strong must use the plugin config, not the session selection')
 })
 
 test('ordinary child requests apply the subagent policy', async () => {
@@ -484,7 +482,7 @@ test('/tier delegated switches the current session and /tier auto leaves it', as
   assert.ok(auto.text.includes('plan mode -> strong tier'), auto.text)
 })
 
-test('/tier set parses fallback chains and follow-session', async () => {
+test('/tier set parses fallback chains and rejects follow-session tokens', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
   const main = makeAgent('main')
@@ -494,8 +492,8 @@ test('/tier set parses fallback chains and follow-session', async () => {
   assert.ok(r1.text.includes('gpt-5.6-terra'), r1.text)
   assert.ok(r1.text.includes('deepseek-official/deepseek-v4-flash@high'), r1.text)
   const r2 = await cmd.handler({ agent: main, rawInput: 'set strong follow-session', signal: undefined })
-  assert.equal(r2.kind, 'success', r2.text)
-  assert.ok(r2.text.includes('follows session selection'), r2.text)
+  assert.equal(r2.kind, 'error', 'follow-session tokens are gone')
+  assert.ok(r2.text.includes('usage:'), r2.text)
   const r3 = await cmd.handler({ agent: main, rawInput: 'set cheap cctq gpt-5.6-terra medium --fallback cctq gpt-5.6-terra max', signal: undefined })
   assert.equal(r3.kind, 'error', 'fallback effort max is undeclared for cctq')
   assert.ok(r3.text.includes('declares only'), r3.text)
@@ -588,8 +586,6 @@ test('tier_configure persists through the settings bridge by default', async () 
   assert.equal(ns, 'tier-routing')
   assert.equal(patch.mode, 'auto')
   assert.equal(patch.cheapProvider, 'opencode-go')
-  assert.equal(patch.cheapFollowSession, false)
-  assert.equal(patch.strongFollowSession, true)
   assert.deepEqual(patch.cheapFallback, [{ provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' }])
   assert.equal(patch.subagentPolicy, 'inherit')
   await configure.execute({ tier: 'strong', provider: 'opencode-go', model: 'deepseek-v4-pro', sessionOnly: true }, { agent: main, signal: undefined })
@@ -601,10 +597,8 @@ test('tier_advisor and tier_review stream through the configured strong tier', a
   applyAgent(ctx)
   const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
   const review = services.tools.registered.find((t) => t.name === 'tier_review')
-  // With followSession the descriptions must say the strong tier follows the
-  // session selection, not a fixed configured model.
-  assert.ok(advisor.description.includes('follows your session model selection'), 'advisor description reflects followSession')
-  assert.ok(review.description.includes('follows your session model selection'), 'review description reflects followSession')
+  assert.ok(advisor.description.includes('configured as deepseek-official/deepseek-v4-pro'), advisor.description)
+  assert.ok(review.description.includes('configured as deepseek-official/deepseek-v4-pro'), review.description)
   const a = await advisor.execute({ question: 'should we proceed?' }, { agent: makeAgent('main'), signal: undefined })
   assert.equal(a.advice, 'MOCK ADVICE')
   assert.equal(a.ok, true)
@@ -618,11 +612,14 @@ test('tier_advisor and tier_review stream through the configured strong tier', a
 test('advisor and review walk the strong fallback chain when the primary route fails', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
-  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
+  const main = makeAgent('main')
+  const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
+  const r0 = await configure.execute({ tier: 'strong', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(r0.ok, true, r0.message)
   const tried = []
   services.llm.stream = async function* (opts) {
     tried.push(opts.provider + '/' + opts.model)
-    if (opts.provider === 'cctq') {
+    if (opts.provider === 'opencode-go') {
       yield { type: 'finish', reason: { kind: 'error', failure: { message: 'quota exhausted', code: 'QUOTA' } } }
       return
     }
@@ -633,17 +630,16 @@ test('advisor and review walk the strong fallback chain when the primary route f
   const a = await advisor.execute({ question: 'proceed?' }, { agent: makeAgent('main'), signal: undefined })
   assert.equal(a.ok, true)
   assert.deepEqual([a.provider, a.model], ['deepseek-official', 'deepseek-v4-pro'], 'the answer names the route that served it')
-  assert.deepEqual(tried, ['cctq/gpt-5.6-sol', 'deepseek-official/deepseek-v4-pro'])
+  assert.deepEqual(tried, ['opencode-go/deepseek-v4-flash', 'deepseek-official/deepseek-v4-pro'])
   const cmd = services.commands.registered.find((c) => c.name === 'tier')
   const review = await cmd.handler({ agent: makeAgent('main'), rawInput: 'review the diff', signal: undefined })
   assert.ok(review.text.startsWith('Review (deepseek-official/deepseek-v4-pro):'), review.text)
-  assert.deepEqual(tried.slice(2), ['cctq/gpt-5.6-sol', 'deepseek-official/deepseek-v4-pro'])
+  assert.deepEqual(tried.slice(2), ['opencode-go/deepseek-v4-flash', 'deepseek-official/deepseek-v4-pro'])
 })
 
 test('consultations stop on failures the main path does not fall back on', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
-  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
   let calls = 0
   services.llm.stream = async function* () {
     calls += 1
@@ -659,20 +655,20 @@ test('tier_status warns when the reviewer shares a model family with an implemen
   const { ctx, services } = makeContext()
   applyAgent(ctx)
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
-  // strong follows the session (deepseek-v4-pro), cheap is gpt: the reviewer is the session model itself.
-  const out = await status.execute({}, { agent: makeAgent('main'), signal: undefined })
-  assert.ok(out.status.includes('review: deepseek-official/deepseek-v4-pro (family deepseek) WARNING'), out.status)
-  assert.ok(out.status.includes('session model deepseek-official/deepseek-v4-pro'), out.status)
-  // No session selection: the reviewer falls back to the explicit strong pair (deepseek), cheap is gpt.
-  services.agentDefaultModel.currentSelection = () => null
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  // The reviewer is the strong config (deepseek), cheap is gpt: no shared family.
   const clean = await status.execute({}, { agent: makeAgent('main'), signal: undefined })
   assert.ok(clean.status.includes('(no implementer shares its family)'), clean.status)
+  // Point cheap at a deepseek-family model: the same-family warning appears.
+  await cmd.handler({ agent: makeAgent('main'), rawInput: 'set cheap deepseek-official deepseek-v4-flash high', signal: undefined })
+  const out = await status.execute({}, { agent: makeAgent('main'), signal: undefined })
+  assert.ok(out.status.includes('review: deepseek-official/deepseek-v4-pro (family deepseek) WARNING'), out.status)
+  assert.ok(out.status.includes('cheap tier deepseek-official/deepseek-v4-flash'), out.status)
 })
 
-test('a followed tier tries its explicit pair right after the session model, then its chain', async () => {
+test('a tier tries its configured chain entries in order', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
-  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
   const main = makeAgent('main')
   const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
   const r = await configure.execute({ tier: 'strong', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
@@ -680,22 +676,18 @@ test('a followed tier tries its explicit pair right after the session model, the
   const route = services.tools.registered.find((t) => t.name === 'tier_route')
   await route.execute({ tier: 'strong' }, { agent: main, signal: undefined })
   let req = await runRequest(ctx, main)
-  assert.equal(req.model, 'gpt-5.6-sol', 'the session model drives the followed strong route')
+  assert.equal(req.model, 'deepseek-v4-flash', 'the explicit strong config is the primary route')
   for (const fn of ctx.listeners['agent/request-error']) await fn({ agent: main, failure: { message: 'quota', code: 'QUOTA' } }, async () => undefined)
   req = await runRequest(ctx, main)
-  assert.deepEqual([req.provider, req.model, req.reasoningEffort], ['opencode-go', 'deepseek-v4-flash', 'high'], 'the explicit pair is the first fallback step')
-  for (const fn of ctx.listeners['agent/request-error']) await fn({ agent: main, failure: { message: 'quota', code: 'QUOTA' } }, async () => undefined)
-  req = await runRequest(ctx, main)
-  assert.equal(req.model, 'deepseek-v4-pro', 'then the configured chain entry')
+  assert.deepEqual([req.provider, req.model, req.reasoningEffort], ['deepseek-official', 'deepseek-v4-pro', 'max'], 'then the configured chain entry')
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   const out = await status.execute({}, { agent: main, signal: undefined })
-  assert.ok(out.status.includes('fallback: opencode-go/deepseek-v4-flash@high -> deepseek-official/deepseek-v4-pro@max'), out.status)
+  assert.ok(out.status.includes('fallback: deepseek-official/deepseek-v4-pro@max'), out.status)
 })
 
 test('roles route advisor and reviewer on their own model and fall back to the strong route', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
-  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
   const tried = []
   services.llm.stream = async function* (opts) {
     tried.push(opts.provider + '/' + opts.model)
@@ -714,18 +706,18 @@ test('roles route advisor and reviewer on their own model and fall back to the s
   assert.equal(r1.ok, true, r1.message)
   assert.ok(r1.message.includes('inactive until /tier roles on'), r1.message)
   await review.execute({ focus: 'x' }, { agent: main, signal: undefined })
-  assert.deepEqual(tried, ['cctq/gpt-5.6-sol'], 'roles off: the review uses the strong route')
+  assert.deepEqual(tried, ['deepseek-official/deepseek-v4-pro'], 'roles off: the review uses the strong route')
   tried.length = 0
   const on = await cmd.handler({ agent: main, rawInput: 'roles on', signal: undefined })
   assert.equal(on.kind, 'success', on.text)
   const out = await review.execute({ focus: 'x' }, { agent: main, signal: undefined })
-  assert.deepEqual(tried, ['opencode-go/deepseek-v4-flash', 'cctq/gpt-5.6-sol'], 'the role route failed, then the strong route answered')
-  assert.deepEqual([out.provider, out.model], ['cctq', 'gpt-5.6-sol'], 'the verdict names the route that answered')
+  assert.deepEqual(tried, ['opencode-go/deepseek-v4-flash', 'deepseek-official/deepseek-v4-pro'], 'the role route failed, then the strong route answered')
+  assert.deepEqual([out.provider, out.model], ['deepseek-official', 'deepseek-v4-pro'], 'the verdict names the route that answered')
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   const st = await status.execute({}, { agent: main, signal: undefined })
   assert.ok(st.status.includes('review: opencode-go/deepseek-v4-flash (family deepseek)'), st.status)
   assert.ok(st.status.includes('(no implementer shares its family)'), st.status)
-  assert.ok(st.status.includes('review chain: WARNING: fallback cctq/gpt-5.6-sol (family gpt, same as cheap tier)'), 'the chain steps into an implementer family')
+  assert.ok(!st.status.includes('review chain: WARNING'), st.status)
   const rejected = await configure.execute({ tier: 'advisor', provider: 'cctq', model: 'gpt-5.6-sol', fallback: [] }, { agent: main, signal: undefined })
   assert.equal(rejected.ok, false)
   assert.ok(rejected.message.includes('share the strong fallback chain'), rejected.message)
@@ -740,7 +732,7 @@ test('the reviewer chain warns only when a fallback step shares an implementer f
   const cmd = services.commands.registered.find((c) => c.name === 'tier')
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   // Strong route without session-follow and without a chain: the reviewer's chain is deepseek only.
-  await configure.execute({ tier: 'strong', provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max', followSession: false, fallback: [], sessionOnly: true }, { agent: main, signal: undefined })
+  await configure.execute({ tier: 'strong', provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max', fallback: [], sessionOnly: true }, { agent: main, signal: undefined })
   await configure.execute({ tier: 'reviewer', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
   await cmd.handler({ agent: main, rawInput: 'roles on', signal: undefined })
   const clean = await status.execute({}, { agent: main, signal: undefined })
@@ -751,11 +743,10 @@ test('the reviewer chain warns only when a fallback step shares an implementer f
 test('three-tier layout: plan runs on main, execution on cheap, escalation on strong', async () => {
   const { ctx, services } = makeContext()
   applyAgent(ctx)
-  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'claude-opus-4', reasoningEffort: 'high' })
   const main = makeAgent('main')
   const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
   const cmd = services.commands.registered.find((c) => c.name === 'tier')
-  const r = await configure.execute({ tier: 'strong', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', followSession: false, sessionOnly: true }, { agent: main, signal: undefined })
+  const r = await configure.execute({ tier: 'strong', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
   assert.equal(r.ok, true, r.message)
   const layout = await cmd.handler({ agent: main, rawInput: 'layout three', signal: undefined })
   assert.equal(layout.kind, 'success', layout.text)
@@ -763,7 +754,7 @@ test('three-tier layout: plan runs on main, execution on cheap, escalation on st
   assert.equal(req.model, 'gpt-5.6-terra', 'execution routes to the cheap tier')
   main.session.events.push({ type: 'plan/mode', data: { active: true } })
   req = await runRequest(ctx, main)
-  assert.equal(req.model, 'claude-opus-4', 'plan mode runs on the main tier (session-followed)')
+  assert.equal(req.model, 'deepseek-v4-pro', 'plan mode runs on the main tier (explicit config)')
   for (const fn of ctx.listeners['agent/error']) {
     await fn({ agent: main, error: { message: 'boom 1' } })
     await fn({ agent: main, error: { message: 'boom 2' } })
@@ -772,7 +763,7 @@ test('three-tier layout: plan runs on main, execution on cheap, escalation on st
   assert.equal(req.model, 'deepseek-v4-flash', 'repeated errors escalate to the strong tier')
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   const out = await status.execute({}, { agent: main, signal: undefined })
-  assert.ok(out.status.includes('layout: three tiers'), out.status)
+  assert.ok(out.status.includes('three tiers'), out.status)
 })
 
 test('caller policy routes a subagent child on the parent current route', async () => {
@@ -854,7 +845,7 @@ test('capped subagents never route above main', async () => {
   const route = services.tools.registered.find((t) => t.name === 'tier_route')
   const cmd = services.commands.registered.find((c) => c.name === 'tier')
   await cmd.handler({ agent: main, rawInput: 'layout three', signal: undefined })
-  const m = await configure.execute({ tier: 'main', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', followSession: false, sessionOnly: true }, { agent: main, signal: undefined })
+  const m = await configure.execute({ tier: 'main', provider: 'opencode-go', model: 'deepseek-v4-flash', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
   assert.equal(m.ok, true, m.message)
   await cmd.handler({ agent: main, rawInput: 'subagent fork capped', signal: undefined })
   await route.execute({ tier: 'strong' }, { agent: main, signal: undefined })
@@ -1372,4 +1363,350 @@ test('smart mode without forceTier keeps the explicit child seed', async () => {
   const req = await runRequest(ctx, child, { provider: 'opencode-go', model: 'custom-model', reasoningEffort: 'high' })
   assert.equal(req.provider, 'opencode-go')
   assert.equal(req.model, 'custom-model')
+})
+
+// ---- decision model (Jev / System One / OpenRouter Decisions) --------------
+
+function patchFetch(handler) {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    const body = opts && opts.body ? JSON.parse(opts.body) : null
+    const value = await handler(body, url, opts)
+    return { ok: true, status: 200, json: async () => value }
+  }
+  return { calls, restore() { globalThis.fetch = original } }
+}
+
+const DECISION_CFG = {
+  decisionModel: 'jevens/jev-1.5',
+  decisionBaseUrl: 'https://openrouter.ai',
+  decisionPath: '/api/alpha/decisions',
+  decisionApiKey: 'sk-test',
+  decisionStages: ['guard', 'escalate', 'worker', 'consult'],
+  decisionApproveAt: 0.9,
+  decisionBlockAt: 0.1,
+  decisionTimeoutMs: 5000,
+  decisionBudgetPerTurn: 10,
+}
+
+function withDecisionSettings(ctx, cfg = DECISION_CFG) {
+  const inner = ctx.services.settings.describe
+  ctx.services.settings.describe = () => inner().map((d) => ({ ns: d.ns, value: { ...d.value, ...cfg } }))
+}
+
+function noulAnswers(p) {
+  return (body) => {
+    const answers = {}
+    for (const [id, q] of Object.entries(body.questions)) {
+      if (q.type === 'noul') answers[id] = { type: 'noul', noul: p }
+      else answers[id] = { type: 'choice', choice: 'strong', confidence: p }
+    }
+    return { answers }
+  }
+}
+
+test('guard second stage: an approve allows the denied command', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    let nextCalled = 0
+    const result = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/x' } }, async () => { nextCalled += 1; return 'ok' })
+    assert.equal(result, 'ok')
+    assert.equal(nextCalled, 1)
+    assert.equal(pf.calls.length, 1)
+  } finally { pf.restore() }
+})
+
+test('guard second stage: block keeps the deterministic deny', async () => {
+  const pf = patchFetch(noulAnswers(0.05))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const result = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/x' } }, async () => {})
+    assert.equal(result.kind, 'deny')
+    assert.ok(result.reason.includes('cheap tier'))
+  } finally { pf.restore() }
+})
+
+test('guard fail-closed: decision endpoint errors never weaken the deny', async () => {
+  const pf = patchFetch(async () => { throw new Error('network down') })
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const result = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/x' } }, async () => {})
+    assert.equal(result.kind, 'deny')
+    const status = services.tools.registered.find((t) => t.name === 'tier_status')
+    const out = await status.execute({}, { agent: main, signal: undefined })
+    assert.ok(out.status.includes('decisionErrors=1'), out.status)
+  } finally { pf.restore() }
+})
+
+test('escalation triage: a confident "not a model fault" blocks escalation', async () => {
+  const pf = patchFetch(noulAnswers(0.05))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    for (const fn of ctx.listeners['agent/error']) {
+      await fn({ agent: main, error: { message: 'boom 1' } })
+      await fn({ agent: main, error: { message: 'boom 2' } })
+    }
+    const status = services.tools.registered.find((t) => t.name === 'tier_status')
+    const out = await status.execute({}, { agent: main, signal: undefined })
+    assert.ok(!out.status.includes('ESCALATED'), out.status)
+    const req = await runRequest(ctx, main)
+    assert.equal(req.model, 'gpt-5.6-terra', 'stays on cheap when the model says the task is at fault')
+  } finally { pf.restore() }
+})
+
+test('escalation triage: approve escalates as usual', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    for (const fn of ctx.listeners['agent/error']) {
+      await fn({ agent: main, error: { message: 'boom 1' } })
+      await fn({ agent: main, error: { message: 'boom 2' } })
+    }
+    const status = services.tools.registered.find((t) => t.name === 'tier_status')
+    const out = await status.execute({}, { agent: main, signal: undefined })
+    assert.ok(out.status.includes('ESCALATED'), out.status)
+    const req = await runRequest(ctx, main)
+    assert.equal(req.model, 'deepseek-v4-pro')
+  } finally { pf.restore() }
+})
+
+test('tier_worker consults the decision model for tier choice when none is specified', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+    let out
+    try {
+      out = await worker.execute({ task: 'analyze this deeply' }, { agent: main, signal: undefined })
+    } catch (e) {
+      console.log('DBG worker threw:', String(e && e.stack || e))
+      throw e
+    }
+    assert.equal(out.tier, 'strong')
+    assert.equal(out.model, 'deepseek-v4-pro')
+    const spec = services.subagents.started[0]
+    assert.ok(spec, 'spawned spec was recorded')
+    assert.ok(spec.request && spec.request.agentOptions, 'agentOptions present: ' + JSON.stringify(spec))
+    assert.equal(spec.request.agentOptions.model, 'deepseek-v4-pro')
+  } finally { pf.restore() }
+})
+
+test('tier_worker keeps an explicit tier choice immune to the decision model', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+    const out = await worker.execute({ task: 'x', tier: 'cheap' }, { agent: main, signal: undefined })
+    assert.equal(out.tier, 'cheap')
+    assert.equal(pf.calls.length, 0, 'explicit tier must not consult')
+  } finally { pf.restore() }
+})
+
+test('tier_advisor is skipped when the decision model says no consult is needed', async () => {
+  const pf = patchFetch(noulAnswers(0.05))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+    const out = await advisor.execute({ question: 'should I refactor?' }, { agent: main, signal: undefined })
+    assert.equal(out.ok, true)
+    assert.ok(out.advice.includes('skipped'), out.advice)
+    assert.equal(out.model, 'jevens/jev-1.5')
+    assert.equal(services.llm.lastStreamOptions, undefined, 'stream must not run for a skipped consult')
+  } finally { pf.restore() }
+})
+
+test('tier_review is skipped with verdict SKIPPED when the decision model blocks', async () => {
+  const pf = patchFetch(noulAnswers(0.05))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const review = services.tools.registered.find((t) => t.name === 'tier_review')
+    const out = await review.execute({ focus: 'merge?', evidence: 'tests pass' }, { agent: main, signal: undefined })
+    assert.equal(out.verdict, 'SKIPPED')
+    assert.equal(out.ok, true)
+    assert.equal(services.llm.lastStreamOptions, undefined)
+  } finally { pf.restore() }
+})
+
+test('plan-exit gate: a skipped advisor review lets the plan through', async () => {
+  const pf = patchFetch(noulAnswers(0.05))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const cmd = services.commands.registered.find((c) => c.name === 'tier')
+    await cmd.handler({ agent: main, rawInput: 'plan', signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    await guard({ agent: main, name: 'read', arguments: { path: 'a.js' } }, async () => {})
+    await guard({ agent: main, name: 'read', arguments: { path: 'b.js' } }, async () => {})
+    let nextCalled = 0
+    const result = await guard({ agent: main, name: 'exit_plan_mode', arguments: { plan: 'do the thing' } }, async () => { nextCalled += 1; return 'ok' })
+    assert.equal(result, 'ok')
+    assert.equal(nextCalled, 1)
+    assert.equal(services.llm.lastStreamOptions, undefined, 'no advisory stream for a skipped review')
+  } finally { pf.restore() }
+})
+
+test('decision budget per turn caps decision-model calls', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx, { ...DECISION_CFG, decisionBudgetPerTurn: 1 })
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const first = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/a' } }, async () => 'ok')
+    assert.equal(first, 'ok', 'first guard deny approved by the decision model')
+    const second = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/b' } }, async () => {})
+    assert.equal(second.kind, 'deny', 'budget spent: deny without consulting')
+    assert.equal(pf.calls.length, 1)
+  } finally { pf.restore() }
+})
+
+test('identical decision states reuse the response cache (one fetch)', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx)
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const args = { command: 'rm -rf /tmp/same' }
+    const a = await guard({ agent: main, name: 'bash', arguments: args }, async () => 'ok')
+    const b = await guard({ agent: main, name: 'bash', arguments: args }, async () => 'ok')
+    assert.equal(a, 'ok')
+    assert.equal(b, 'ok')
+    assert.equal(pf.calls.length, 1, 'second identical denial hits the decision cache')
+  } finally { pf.restore() }
+})
+
+test('decision model off by default: deterministic behavior and zero network traffic', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const result = await guard({ agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/x' } }, async () => {})
+    assert.equal(result.kind, 'deny')
+    for (const fn of ctx.listeners['agent/error']) {
+      await fn({ agent: main, error: { message: 'boom' } })
+      await fn({ agent: main, error: { message: 'boom' } })
+    }
+    const status = services.tools.registered.find((t) => t.name === 'tier_status')
+    const out = await status.execute({}, { agent: main, signal: undefined })
+    assert.ok(out.status.includes('ESCALATED'), out.status)
+    assert.equal(pf.calls.length, 0, 'no decision traffic when unconfigured')
+  } finally { pf.restore() }
+})
+
+test('/tier status reports the decision model configuration and counters', async () => {
+  const pf = patchFetch(noulAnswers(0.5))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx, { ...DECISION_CFG, decisionStages: ['escalate'] })
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    for (const fn of ctx.listeners['agent/error']) {
+      await fn({ agent: main, error: { message: 'boom 1' } })
+      await fn({ agent: main, error: { message: 'boom 2' } })
+    }
+    const cmd = services.commands.registered.find((c) => c.name === 'tier')
+    const out = await cmd.handler({ agent: main, rawInput: 'status', signal: undefined })
+    assert.ok(out.text.includes('decision model: jevens/jev-1.5'), out.text)
+    assert.ok(out.text.includes('stages: escalate'), out.text)
+    assert.ok(out.text.includes('decisionCalls=1'), out.text)
+  } finally { pf.restore() }
+})
+test('smart mode pins the main agent to the explicit strong config even with a cheap session model', async () => {
+  const { ctx, services } = makeContext()
+  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  const req = await runRequest(ctx, main)
+  assert.equal(req.model, 'deepseek-v4-pro', 'the strong tier config decides, not the session picker')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('effective route now: deepseek-official/deepseek-v4-pro'), out.status)
+})
+
+test('smart mode respects the configured strong tier after /tier set', async () => {
+  const { ctx, services } = makeContext()
+  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r1 = await cmd.handler({ agent: main, rawInput: 'set strong opencode-go deepseek-v4-flash high', signal: undefined })
+  assert.equal(r1.kind, 'success', r1.text)
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  const req = await runRequest(ctx, main)
+  assert.deepEqual([req.provider, req.model], ['opencode-go', 'deepseek-v4-flash'], 'the configured strong tier runs regardless of the session picker')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('effective route now: opencode-go/deepseek-v4-flash'), out.status)
+})
+
+test('smart mode in the three-tier layout pins main to its explicit config', async () => {
+  const { ctx, services } = makeContext()
+  services.agentDefaultModel.currentSelection = () => ({ provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  await cmd.handler({ agent: main, rawInput: 'layout three', signal: undefined })
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  let req = await runRequest(ctx, main)
+  assert.equal(req.model, 'deepseek-v4-pro', 'plan tier = main uses its explicit config')
+  const r2 = await cmd.handler({ agent: main, rawInput: 'set main opencode-go deepseek-v4-flash high', signal: undefined })
+  assert.equal(r2.kind, 'success', r2.text)
+  req = await runRequest(ctx, main)
+  assert.equal(req.model, 'deepseek-v4-flash', 'main pinned to its explicit config')
 })

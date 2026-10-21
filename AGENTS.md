@@ -66,9 +66,9 @@ Node `^22.19 || >=24`. No build step — plain ESM (`"type": "module"`).
 - **Anything that can fail with `UNSUPPORTED_REASONING_EFFORT`** → fit the
   effort through `reconcileReasoningEffort` before dispatch (undeclared level →
   nearest declared; no reasoning metadata → omit the field entirely).
-- **Decision models (Jev/Clef/OpenRouter Decisions)** → planned
-  `lib/dsh/decisions.js`; see README Roadmap. Deterministic policy stays the
-  default fallback.
+- **Decision models (Jev/Clef/OpenRouter Decisions)** → `lib/dsh/decisions.js`
+  (transport) + `lib/core/decision.js` (pure logic). Add a stage by wiring one
+  `askDecision` call into its seam; deterministic policy stays the fallback.
 
 ## Testing conventions
 

@@ -81,7 +81,7 @@ every model request:
         │        escalated > sessionMode > subagentPolicy > auto(plan?strong:cheap)
         │     effectiveTarget(agent, tier):
         │        active fallback chain entry? → chain target (chainFor: explicit pair first when followed)
-        │        strong/main + followSession → agentDefaultModel.currentSelection()
+        │        strong/main → explicit tier config (plugin settings only)
         │        cheap                      → cheap config + raised effort (if any)
         │     tierNameFor → planActive ? (three tiers: main, two: strong) : cheap
         └─ return {...seed, provider, model, reasoningEffort} (loop logs the header)
@@ -140,7 +140,7 @@ the reserved `awaiting-confirm` phase for a future ask-policy.
 ## 5. Configuration & persistence
 
 The `Config` schema (top of `index.js`) declares flat volatile fields:
-`plane`, `mode`, `strong{Provider,Model,Effort,FollowSession,Fallback}`,
+`plane`, `mode`, `strong{Provider,Model,Effort,Fallback}`,
 `main{...}`, `cheap{...}`, `threeTiers` (layout switch), `rolesEnabled` (roles
 switch), `advisor{Provider,Model,Effort}` and `reviewer{Provider,Model,Effort}`
 (roles have no follow/fallback fields: they share the strong chain),
@@ -158,8 +158,8 @@ via `.get()` — `dsh/config.js` `vol()` handles both shapes).
   works in memory and `/tier status` says `config persisted: in-memory only`.
 
 Defaults: strong = `deepseek-official/deepseek-v4-pro@max` with
-`followSession: true` and a self-fallback entry; main =
-`deepseek-official/deepseek-v4-pro@high` following the session (inactive until
+`explicit provider/model/effort` and a self-fallback entry; main =
+`deepseek-official/deepseek-v4-pro@high` (inactive until
 `threeTiers`); cheap = `deepseek-official/deepseek-v4-flash@low` with an empty
 chain; roles off with no models; `subagentPolicy: 'inherit'`; `mode: 'auto'`.
 
@@ -173,8 +173,8 @@ role route when roles are on, then the strong route and its chain.
 
 | Surface | What it does |
 | --- | --- |
-| `tier_route` tool / `/tier strong|cheap|auto|delegated|off` | Per-session mode; `persist:true` also writes `agentDefaultModel` |
-| `tier_configure` / `/tier set` | Re-point a tier (provider/model/effort/followSession/fallback chain) with `resolveModelInfo` effort validation; persists via settings |
+| `tier_route` tool / `/tier strong|cheap|auto|delegated|off` | Per-session mode; `persist:true` also writes the session default via the plugin |
+| `tier_configure` / `/tier set` | Re-point a tier (provider/model/effort/fallback chain) with `resolveModelInfo` effort validation; persists via settings |
 | `tier_advisor` / `/advisor`, `tier_review` / `/tier review` | Strong-tier consultations via `consult.js` specs; `runConsult` walks `attemptChain(primary, strong chain)` through `streamText`, stateless per call |
 | `tier_worker` | `startWorker` on a chosen tier; `outputSchema`, `agentPreset` (spawn), `maxDepth`, `background` (jobs) |
 | `tier_escalate_effort` / `/tier effort` | One effort step up the ladder, bounded by declared efforts |
@@ -235,11 +235,10 @@ If a future DSH changes the standard roster, update this list to match the new
   `awaiting-confirm` phase; implement via `tools/pre-execute`'s
   `{kind:'ask'}` or an `ask_user` tool call, then resume/cancel the pending
   route change.
-- **Decision models (Jev/Clef/…)**: planned `lib/dsh/decisions.js` — POST
-  `{state, questions}` to OpenRouter `/api/alpha/decisions` or any
-  `/v1/systemone`-compatible endpoint (model id as a config field). Feed its
-  answer into `policy.js`; keep the deterministic policy as the no-key
-  fallback. Not for the per-request hot path.
+- **Decision models (Jev/Clef/…)**: implemented — see §13. The pure core
+  (`lib/core/decision.js`) and the transport (`lib/dsh/decisions.js`) are
+  separate layers; adding another stage is wiring one `askDecision` call into
+  the seam that owns the decision.
 - **Custom settings UI**: the `settings.section` UI slot still exists in 0.2;
   a hand-built card (provider→model→effort cascading selects) can replace the
   generated page later without changing the volatile schema.
@@ -387,3 +386,54 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
   require a prior read; `edit` accepts a list of disjoint replacements).
 - All file access goes through the mounted `ctx.fs` backend — containment is
   the harness's job, as with the TurboQuant cache.
+
+## 13. v0.10.0 additions: decision-model stages (Jev / System One / OpenRouter Decisions)
+
+### The two layers
+
+- `lib/core/decision.js` (pure, unit-tested): question builders
+  (`buildGuardQuestions`, `buildTierQuestion`, `buildEscalationQuestion`,
+  `buildConsultQuestion`), the strict response parser `parseDecisionAnswers`
+  (a missing/out-of-range/unknown answer is an error, never a silent
+  "approved"), threshold mapping `decideByThresholds`
+  (approve/block/review/unknown), and `decisionKey` (cache identity).
+- `lib/dsh/decisions.js`: the transport client. POSTs
+  `{ model, state, questions }` to the OpenRouter Decisions API
+  (`/api/alpha/decisions`, configurable base URL + path — any
+  Jev-compatible endpoint works) with bearer auth when an API key is set,
+  aborts on timeout (`AbortSignal.timeout`), parses through the core parser,
+  caches identical-state responses for 60s, and returns `{ ok: false }` for
+  every failure — it never throws. `fetchImpl` is injectable for tests.
+
+### Configuration
+
+Volatile host-row fields: `decisionModel`, `decisionBaseUrl` (empty →
+https://openrouter.ai), `decisionPath` (default /api/alpha/decisions),
+`decisionApiKey`, `decisionStages` (enable list over
+`guard | escalate | worker | consult`), `decisionApproveAt` /
+`decisionBlockAt` thresholds, `decisionTimeoutMs`, `decisionBudgetPerTurn`.
+No model configured → every stage off → deterministic behavior unchanged.
+
+### Where decisions plug in (all async seams)
+
+| Stage | Seam | Question(s) | Override semantics |
+| --- | --- | --- | --- |
+| `guard` | `tools/pre-execute`, after a deterministic high-impact deny | reversible, within_project, serves_task (noul) | only outcome `approve` allows; anything else keeps the deny (fail-closed) |
+| `escalate` | `agent/error`, when the escalation threshold is reached | model_fault (noul) | only outcome `block` skips escalation (record stays counting); approve/review/unknown escalate as before |
+| `worker` | `tier_worker` / `tier_sidekick` when no tier/stage override is given | tier choice (choice + confidence) | only `approve` with a valid, registered candidate switches the route |
+| `consult` | `runConsult` (advisor/review/plan-exit gate) | needs_consult (noul) | outcome `block` returns a `skipped` result; callers render it without streaming |
+
+### Safety properties
+
+- The deterministic policy is always the fallback: no model, no key, budget
+  spent, network error, timeout, or malformed answer → `null` from
+  `askDecision` → the caller keeps its prior behavior.
+- A decision model never *broadens* the deterministic layer except through an
+  explicit full `approve`; guard approval requires every noul proposition ≥
+  `approveAt`.
+- Per-agent per-turn budget (`decisionTurnCalls`, reset on user messages)
+  mirrors the advisor budget; cached identical states do not consume network
+  or budget beyond the first call.
+- Strict parsing: out-of-range probability, unknown choice option, missing
+  answer, or non-JSON response is an error, never a silent "approved".
+- Never on the per-request hot path (`agent/request` is untouched).
