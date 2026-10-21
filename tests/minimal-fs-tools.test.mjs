@@ -144,3 +144,44 @@ test('edit tool merges multiple edits in one call', async () => {
   assert.equal(fs.state.written, 'ONE\nline two\nTHREE')
   assert.equal(value.content, 'Successfully replaced 2 block(s) in x.txt.')
 })
+
+// ---- sandbox policy: every mutation carries the CALLING session's policy --
+
+test('write and edit pass the resolved sandbox policy of the calling session', async () => {
+  const calls = []
+  const fs = {
+    async resolve(path) { return { path } },
+    async readText() { return SRC },
+    async writeText(target, content, expected, signal, policy) { calls.push({ content, policy }) },
+  }
+  const requests = []
+  const sandboxPolicy = {
+    resolve(request) {
+      requests.push(request)
+      return { mode: 'danger-full-access', workspaceRoot: 'D:/repo' }
+    },
+  }
+  const session = { id: 'child-1', header: { cwd: 'D:/repo' } }
+  const tools = createMinimalFsTools({ fs, getCwd: () => undefined, sandboxPolicy })
+  await tools[1].execute({ path: 'x.txt', content: 'new' }, { agent: { session }, signal: undefined })
+  await tools[2].execute({ path: 'x.txt', edits: [{ oldText: 'line one', newText: 'ONE' }] }, { agent: { session }, signal: undefined })
+  assert.equal(calls.length, 2)
+  for (const call of calls) {
+    assert.deepEqual(call.policy, { mode: 'danger-full-access', workspaceRoot: 'D:/repo' })
+  }
+  assert.equal(requests.length, 2)
+  for (const request of requests) assert.equal(request.session, session)
+})
+
+test('without a policy service the mutation keeps the backend default', async () => {
+  const calls = []
+  const fs = {
+    async resolve(path) { return { path } },
+    async readText() { return SRC },
+    async writeText(target, content, expected, signal, policy) { calls.push(policy) },
+  }
+  const tools = createMinimalFsTools({ fs, getCwd: () => undefined })
+  await tools[1].execute({ path: 'x.txt', content: 'new' }, { signal: undefined })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0], undefined)
+})

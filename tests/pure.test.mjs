@@ -10,7 +10,7 @@ import { consultSpec, CONSULTS, modelFamily, reviewerConflicts } from '../lib/co
 import { childRouteSource, cappedTier } from '../lib/core/routing.js'
 import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/core/tiers.js'
 import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS } from '../lib/core/turbovec.js'
-import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
+import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, formatMemoryBlock, digestStagesFor, WORKER_STAGE, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
 import { decideAdvisorBudget } from '../lib/core/policy.js'
 import {
   noulQuestion, choiceQuestion, scoreQuestion, buildGuardQuestions, buildTierQuestion,
@@ -504,17 +504,33 @@ test('TurboQuant import skips corrupt entries and reports them', () => {
 
 // ---- v0.8.1: digest cards, filters, deterministic sort, v2 import ----------
 
-test('upsertDigest stores cards and caps per stage at 8', () => {
+test('upsertDigest stores cards and caps per stage at 16', () => {
   const idx = createTurboQuantIndex({ dim: 512 })
   for (let i = 0; i < 10; i++) {
     idx.upsertDigest({ stage: 'implement', area: 'area-' + i, diffSummary: 'change ' + i, checks: 'pass' })
   }
   const st = idx.stats()
-  assert.equal(st.digests, 8)
+  assert.equal(st.digests, 10, 'ten cards are below the cap')
   assert.equal(st.snippets, 0)
-  // oldest (area-0, area-1) were evicted, newest 8 kept
+})
+
+test('the per-stage digest cap keeps 16 cards and evicts the 17th oldest', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  for (let i = 0; i < 17; i++) {
+    idx.upsertDigest({ stage: 'implement', area: 'area-' + i, diffSummary: 'change ' + i, checks: 'pass', updatedAt: i + 1 })
+  }
+  const st = idx.stats()
+  assert.equal(st.digests, 16, 'the cap is 16 cards per stage')
   const paths = idx.exportState().entries.filter((e) => e.kind === 'digest').map((e) => e.path).sort()
-  assert.deepEqual(paths, ['area-2', 'area-3', 'area-4', 'area-5', 'area-6', 'area-7', 'area-8', 'area-9'])
+  assert.equal(paths.length, 16)
+  assert.ok(paths.includes('area-16'), 'the newest card is kept')
+  assert.ok(!paths.includes('area-0'), 'the oldest card was evicted')
+  assert.ok(paths.includes('area-1'))
+  // Another stage keeps its own quota.
+  idx.upsertDigest({ stage: 'worker', area: 'w-1', diffSummary: 'worker change', updatedAt: 100 })
+  assert.equal(idx.stats().digests, 17)
+  assert.equal(idx.stats().stages.implement, 16)
+  assert.equal(idx.stats().stages.worker, 1)
 })
 
 test('upsertDigest refreshes an existing area+stage card', () => {
@@ -559,6 +575,53 @@ test('search filters by kindFilter, stageFilter and array pathFilter', () => {
   const both = idx.search('parseRequest', { k: 10, minScore: 0.05, pathFilter: ['src/a.ts', 'src/b.ts'] })
   assert.ok(both.some((h) => h.path === 'src/a.ts'))
   assert.ok(both.some((h) => h.path === 'src/b.ts'))
+})
+
+test('search accepts an array stageFilter', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsertDigest({ stage: 'implement', area: 'src/a.ts', diffSummary: 'implemented parseRequest with tests' })
+  idx.upsertDigest({ stage: 'fix', area: 'src/c.ts', diffSummary: 'fixed parseRequest leak' })
+  idx.upsertDigest({ stage: 'worker', area: 'src/w.ts', diffSummary: 'worker changed parseRequest' })
+  const both = idx.search('parseRequest', { k: 5, minScore: 0.05, kindFilter: 'digest', stageFilter: ['implement', 'worker'] })
+  assert.ok(both.length >= 2, 'both stages match: ' + both.length)
+  assert.ok(both.every((h) => h.stage === 'implement' || h.stage === 'worker'))
+  const one = idx.search('parseRequest', { k: 5, minScore: 0.05, kindFilter: 'digest', stageFilter: ['fix'] })
+  assert.ok(one.length >= 1)
+  assert.ok(one.every((h) => h.stage === 'fix'))
+  const single = idx.search('parseRequest', { k: 5, minScore: 0.05, kindFilter: 'digest', stageFilter: 'implement' })
+  assert.ok(single.every((h) => h.stage === 'implement'))
+  const none = idx.search('parseRequest', { k: 5, minScore: 0.05, kindFilter: 'digest', stageFilter: ['explore'] })
+  assert.equal(none.length, 0)
+})
+
+test('stats().stages counts the digest cards per stage', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsertDigest({ stage: 'implement', area: 'a', diffSummary: 'one' })
+  idx.upsertDigest({ stage: 'implement', area: 'b', diffSummary: 'two' })
+  idx.upsertDigest({ stage: 'worker', area: 'c', diffSummary: 'three' })
+  idx.upsert({ id: 's', path: 'src/a.ts', lines: '1', snippet: 'export const x = 1', stage: 'explore' })
+  const st = idx.stats()
+  assert.deepEqual(st.stages, { explore: 0, implement: 2, fix: 0, worker: 1 })
+  assert.equal(st.snippets, 1)
+  assert.equal(st.digests, 3)
+})
+
+test('list returns plain entries sorted by path, lines and stage', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 's2', path: 'src/b.ts', lines: '10-20', snippet: 'export const b = 1', stage: 'explore', updatedAt: 2 })
+  idx.upsert({ id: 's1', path: 'src/b.ts', lines: '1-5', snippet: 'export const a = 1', stage: 'explore', updatedAt: 1 })
+  idx.upsertDigest({ stage: 'implement', area: 'src/a.ts', diffSummary: 'implemented', updatedAt: 3 })
+  const all = idx.list()
+  assert.deepEqual(all.map((e) => e.path + ':' + e.lines), ['src/a.ts:', 'src/b.ts:1-5', 'src/b.ts:10-20'])
+  assert.deepEqual(all.map((e) => e.kind), ['digest', 'snippet', 'snippet'])
+  assert.ok(!('codes' in all[0]), 'list never exposes the quantized codes')
+  assert.equal(all[0].stage, 'implement')
+  const digests = idx.list({ kind: 'digest' })
+  assert.equal(digests.length, 1)
+  const workers = idx.list({ stage: 'worker' })
+  assert.equal(workers.length, 0)
+  const many = idx.list({ stage: ['implement', 'explore'] })
+  assert.equal(many.length, 3)
 })
 
 test('search sorts deterministically on equal scores', () => {
@@ -642,6 +705,33 @@ test('sidekick buildUser appends cards and snippets after the stable prefix', ()
   assert.ok(user.includes('Previous outcomes (memory):'))
   assert.ok(user.includes('• [implement/src/parser.ts]'))
   assert.ok(user.includes('Known cached snippets'))
+})
+
+test('digestStagesFor: explore sees only explore, the other stages see the worker', () => {
+  assert.equal(WORKER_STAGE, 'worker')
+  assert.equal(digestStagesFor('explore'), 'explore')
+  assert.deepEqual(digestStagesFor('implement'), ['implement', 'worker'])
+  assert.deepEqual(digestStagesFor('fix'), ['fix', 'worker'])
+})
+
+test('formatMemoryBlock renders the cards and snippets like the sidekick prompt', () => {
+  const card = formatCard({ stage: 'implement', path: 'src/parser.ts', snippet: 'added validation', note: 'pass' })
+  const lines = formatMemoryBlock({
+    cards: [card],
+    snippets: [{ path: 'src/parser.ts', lines: '1-25', snippet: 'export function parseRequest(req) {}' }],
+  })
+  assert.deepEqual(lines, [
+    'Previous outcomes (memory):',
+    card,
+    'Known cached snippets (do not re-grep unless needed):',
+    '- src/parser.ts:1-25 export function parseRequest(req) {}',
+  ])
+  const custom = formatMemoryBlock({ snippets: [{ path: 'a.ts', snippet: 'x' }], snippetsLabel: 'Relevant snippets' })
+  assert.deepEqual(custom, ['Relevant snippets (do not re-grep unless needed):', '- a.ts x'])
+  assert.deepEqual(formatMemoryBlock({}), [])
+  // the same wording as the sidekick prompt builder
+  const user = sidekickSpec('implement').buildUser({ task: 't', cards: [card], snippets: [{ path: 'src/parser.ts', lines: '1-25', snippet: 'export function parseRequest(req) {}' }] })
+  assert.ok(user.includes(lines.join('\n')), user)
 })
 
 test('resolveSidekickTarget: stage override wins, else cheap tier', () => {
@@ -852,6 +942,64 @@ test('parseDecisionAnswers validates choice criteria and confidence', () => {
   assert.equal(ok.probabilities.tier, 0.8)
   const unknown = parseDecisionAnswers({ answers: { tier: { type: 'choice', choice: 'main' } } }, questions)
   assert.equal(unknown.ok, false)
+})
+
+test('a choice answer without confidence is read from its probability map', () => {
+  const questions = { tier: choiceQuestion('which?', { cheap: 'c', strong: 's' }) }
+  const chosen = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', probabilities: { cheap: 0.16, strong: 0.84 } } },
+  }, questions)
+  assert.equal(chosen.ok, true)
+  assert.equal(chosen.values.tier, 'strong')
+  assert.equal(chosen.probabilities.tier, 0.84, 'the probability of the chosen option counts')
+  const other = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', probabilities: { cheap: 0.2, strong: 0.6 } } },
+  }, questions)
+  assert.equal(other.probabilities.tier, 0.6)
+  const missing = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong' } },
+  }, questions)
+  assert.equal(missing.ok, true)
+  assert.equal(missing.probabilities.tier, undefined, 'no probability, no approval')
+  const broken = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', probabilities: { cheap: 'x', strong: null } } },
+  }, questions)
+  assert.equal(broken.probabilities.tier, undefined, 'an invalid map is ignored, not trusted')
+})
+
+test('a choice answer never borrows the probability of another option', () => {
+  const questions = { tier: choiceQuestion('which?', { cheap: 'c', strong: 's' }) }
+  const out = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', probabilities: { cheap: 0.99 } } },
+  }, questions)
+  assert.equal(out.ok, true)
+  assert.equal(out.probabilities.tier, undefined, 'the chosen option has no probability: no approval')
+  const inherited = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'constructor', probabilities: {} } },
+  }, { tier: { type: 'choice', instructions: 'which?' } })
+  assert.equal(inherited.ok, true)
+  assert.equal(inherited.probabilities.tier, undefined, 'a prototype key is not a probability')
+  const coerced = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', confidence: '0.99' } },
+  }, questions)
+  assert.equal(coerced.probabilities.tier, undefined, 'a string is not a probability')
+  const outOfRange = parseDecisionAnswers({
+    answers: { tier: { type: 'choice', choice: 'strong', confidence: 2 } },
+  }, questions)
+  assert.equal(outOfRange.probabilities.tier, undefined)
+})
+
+test('a score answer falls back to its confidence', () => {
+  const questions = { urgency: scoreQuestion('how urgent?') }
+  const out = parseDecisionAnswers({ answers: { urgency: { type: 'score', confidence: 0.9 } } }, questions)
+  assert.equal(out.ok, true)
+  assert.equal(out.values.urgency, 0.9)
+  assert.equal(out.probabilities.urgency, 0.9)
+  const scored = parseDecisionAnswers({ answers: { urgency: { type: 'score', score: 3 } } }, questions)
+  assert.equal(scored.values.urgency, 3)
+  assert.equal(scored.probabilities.urgency, undefined, 'a raw score is not a probability')
+  const broken = parseDecisionAnswers({ answers: { urgency: { type: 'score' } } }, questions)
+  assert.equal(broken.ok, false)
 })
 
 test('decideByThresholds maps probabilities to approve/block/review/unknown', () => {

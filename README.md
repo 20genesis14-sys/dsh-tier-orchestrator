@@ -251,27 +251,32 @@ A Pi-style minimal prompt for users who want the leanest possible agent:
 
 - **Persona**: one line (`You are an expert coding assistant.`), no
   time-context, no workspace-instruction budget (`agent-instructions`).
-- **Tools**: exactly the Pi-shaped `read` / `write` / `edit` (registered by
-  this plugin with sparse schemas; no fs-observation-policy, so edits do not
+- **Tools**: the Pi-shaped `read` / `write` / `edit` (registered by this
+  plugin with sparse schemas; no fs-observation-policy, so edits do not
   require a prior read) plus the platform terminal — `bash` on POSIX,
-  `pwsh` on Windows — with a one-line description. No skills, jobs, schedule,
-  goal, todo, web, present, ask-user, subagents/workflow, fs-search, MCP, or
-  plugin-manager tools.
+  `pwsh` on Windows — with a one-line description. Of this plugin's own tools
+  only `tier_worker` is declared: every registered tool adds its definition to
+  every request, so the seven other `tier_*` tools (`tier_status`,
+  `tier_advisor`, `tier_review`, `tier_route`, `tier_configure`,
+  `tier_escalate_effort`, `tier_sidekick`) are registered in the standard
+  preset only. No skills, jobs, schedule, goal, todo, web, present, ask-user,
+  subagents/workflow, fs-search, MCP, or plugin-manager tools.
 - **System prompt**: the `tier-routing` section collapses to a few lines.
-  Full routing guidance is available on demand via `tier_advisor`,
-  `tier_review`, `tier_worker`, and `/tier`. A built-in hint tells the model
-  to delegate tasks needing tools outside the minimal set (e.g. web, skills)
-  via `tier_worker` with `agentPreset: tiered`, so heavy work can happen
-  automatically without leaving the minimal session.
+  The routing rules are not in the prompt at all: use the `/tier` slash
+  commands for routing control and `tier_worker` for delegated work. A
+  built-in hint tells the model to delegate tasks needing tools outside the
+  minimal set (e.g. web, skills) via `tier_worker` with `agentPreset: tiered`,
+  so heavy work can happen automatically without leaving the minimal session.
 - **Plan mode**: still available; its instruction section enters the prompt
   only while plan mode is active.
 - **Context compaction**: enabled.
 
-Routing, escalation, fallback, and the advisor/review tools work identically
-in both presets. Excluded capabilities are not lost: use them in a session on
-the `tiered` preset, or spawn a worker on it from a minimal session with
-`tier_worker` + `agentPreset: tiered`. The preset is chosen at session
-creation; existing sessions keep theirs (DSH behavior).
+Routing, escalation, and fallback work identically in both presets; the
+advisor, review, route, configure, status and sidekick tools exist only in
+the standard preset. Excluded capabilities are not lost: use them in a
+session on the `tiered` preset, or spawn a worker on it from a minimal
+session with `tier_worker` + `agentPreset: tiered`. The preset is chosen at
+session creation; existing sessions keep theirs (DSH behavior).
 
 ## Usage
 
@@ -286,7 +291,7 @@ creation; existing sessions keep theirs (DSH behavior).
 /tier smart                                 # pin the main agent to the plan tier; file edits go through tier_sidekick
 /tier cache <status|clear|search <query>>   # inspect/clear the TurboQuant snippet cache or query it
 /tier off                                   # disable routing for this session, restore its default model (other sessions unaffected)
-/tier plan                                  # auto + enter plan mode, apply the strong header immediately
+/tier plan                                  # enter plan mode and route the plan to the plan tier; smart/auto/explicit tiers are kept, off/delegated switch to auto
 /tier models                                # list registered providers and their models
 /tier main                                  # route this session to the main tier (three-tier layout only)
 /tier layout <two|three>                    # two tiers (default) or three (adds main; strong escalates)
@@ -354,11 +359,27 @@ pass `persist: true` to also write the session default model (`agent-default-mod
 Failure auto-escalation parameters (threshold / window / TTL) are currently built-in
 constants; configurable in a later version.
 
-The decision-model stage has no slash commands — it is configured entirely through
-volatile fields on the host `tier-routing` entry (the plugin's WebUI settings page):
-`decisionModel`, `decisionBaseUrl`, `decisionPath`, `decisionApiKey`,
-`decisionStages` (`guard|escalate|worker|consult`), `decisionApproveAt`,
-`decisionBlockAt`, `decisionTimeoutMs`, `decisionBudgetPerTurn`. Empty
+The decision-model stage has no slash commands — it is configured in the plugin's
+WebUI settings page: open Settings → Plugins → dsh-tier-orchestrator (or the
+`tier-routing` component row) and use the **Decision model** section. It holds
+`decisionModel`, `decisionBaseUrl`, `decisionPath`, `decisionApiKey` (masked,
+revealed on demand), `decisionStages` (`guard|escalate|worker|consult`, one
+checkbox per stage), `decisionApproveAt`, `decisionBlockAt`, `decisionTimeoutMs`
+and `decisionBudgetPerTurn`. The decision model is picked from the catalog of
+the endpoint: OpenRouter lists its decision models (Jev, Clef, Drex, the
+Perplexity Decider, ...) under `/api/v1/models?output_modalities=decisions`,
+a public list the browser reads without the API key. A model the catalog does
+not list can still be typed in. `decisionCatalogPath` and
+`decisionCatalogQuery` point the picker at another endpoint or another query.
+These are the volatile fields of the host
+`tier-routing` entry, so an edited value is persisted with the profile. The
+form validates the thresholds and the numbers before they are written (the
+same bounds the plugin clamps to) and rejects an unknown stage name instead of
+dropping it. The API key is masked in the form and can be revealed or cleared
+there; it is stored in plain text in the profile entry, and it still reaches
+the browser, so treat the WebUI as a trusted surface. The form warns about a
+non-https endpoint, about stages selected without a model, and about an approve
+threshold below the block threshold. Empty
 `decisionModel` (the default) disables every stage and produces zero network
 traffic. `/tier status` prints the live decision line and counters.
 

@@ -192,21 +192,25 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
 
 - **Persona**：一行（`You are an expert coding assistant.`），无 time-context，
   无 workspace 指令预算（`agent-instructions`）。
-- **工具**：只有 Pi 风格的 `read` / `write` / `edit`（由本插件注册，schema 精简，
+- **工具**：Pi 风格的 `read` / `write` / `edit`（由本插件注册，schema 精简，
   无 fs-observation-policy——编辑不要求先读）加平台终端——POSIX 用 `bash`，
-  Windows 用 `pwsh`——描述仅一行。不含 skills、jobs、schedule、goal、todo、
-  web、present、ask-user、subagents/workflow、fs-search、MCP、plugin-manager 工具。
-- **系统提示**：`tier-routing` 段折叠为几行；完整路由指引按需通过
-  `tier_advisor` / `tier_review` / `tier_worker` / `/tier` 获取。内置提示会告诉模型：
-  需要最小集之外工具（如 web、skills）的任务，应通过 `tier_worker` +
-  `agentPreset: tiered` 自动委托，无需离开极简会话。
+  Windows 用 `pwsh`——描述仅一行。本插件自己的工具里只声明 `tier_worker`：
+  每个已注册工具都会把定义带进每个请求，因此另外七个 `tier_*` 工具
+  （`tier_status`、`tier_advisor`、`tier_review`、`tier_route`、
+  `tier_configure`、`tier_escalate_effort`、`tier_sidekick`）只在 standard
+  预设注册。不含 skills、jobs、schedule、goal、todo、web、present、ask-user、
+  subagents/workflow、fs-search、MCP、plugin-manager 工具。
+- **系统提示**：`tier-routing` 段折叠为几行；路由规则本身不在提示里：路由控制用
+  `/tier` 斜杠命令，委派任务用 `tier_worker`。内置提示会告诉模型：需要最小集之外
+  工具（如 web、skills）的任务，应通过 `tier_worker` + `agentPreset: tiered`
+  自动委托，无需离开极简会话。
 - **Plan 模式**：仍可用；其指令段只在 plan 模式激活时进入提示。
 - **上下文压缩**：启用。
 
-路由、升级、fallback、advisor/review 工具在两个预设中行为一致。被排除的能力
-并未丢失：在 `tiered` 预设的会话中使用，或在极简会话里用 `tier_worker` +
-`agentPreset: tiered` 派生带完整工具的子代理。预设在新会话创建时选择；已有会话
-保留原预设（DSH 行为）。
+路由、升级、fallback 在两个预设中行为一致；advisor、review、route、configure、
+status、sidekick 工具只在 standard 预设存在。被排除的能力并未丢失：在 `tiered`
+预设的会话中使用，或在极简会话里用 `tier_worker` + `agentPreset: tiered` 派生
+带完整工具的子代理。预设在新会话创建时选择；已有会话保留原预设（DSH 行为）。
 
 ## 使用
 
@@ -221,7 +225,7 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
 /tier smart                                 # 主代理固定在规划档；文件修改交给 tier_sidekick
 /tier cache <status|clear|search <query>>   # 查看/清空 TurboQuant 片段缓存或按查询检索
 /tier off                                   # 本会话关闭路由并恢复默认模型（不影响其他会话）
-/tier plan                                  # auto + 进入计划模式，并立即应用强档 header
+/tier plan                                  # 进入计划模式并把计划请求路由到规划档；smart/auto/显式档位保持不变，off/delegated 切到 auto
 /tier models                                # 列出已注册 provider 与其模型
 /tier main                                  # 本会话走主档（仅三档布局）
 /tier layout <two|three>                    # 双档（默认）或三档（加入主档，强档作为升级档）
@@ -286,10 +290,21 @@ Tiered model routing
 且默认不持久化，传 `persist: true` 才写入会话默认模型（`agent-default-model`）。
 失败自动升级参数（阈值 / 窗口 / 时长）当前为内建常量，后续版本可配置化。
 
-决策模型没有斜杠命令——完全通过 host `tier-routing` 条目的 volatile 字段
-（插件的 WebUI 设置页）配置：`decisionModel`、`decisionBaseUrl`、`decisionPath`、
-`decisionApiKey`、`decisionStages`（`guard|escalate|worker|consult`）、
+决策模型没有斜杠命令——它在插件的 WebUI 设置页里配置：打开 设置 → 插件 →
+dsh-tier-orchestrator（或 `tier-routing` 组件行），使用 **决策模型** 区块。其中包含
+`decisionModel`、`decisionBaseUrl`、`decisionPath`、`decisionApiKey`（掩码显示，
+可按需展开）、`decisionStages`（`guard|escalate|worker|consult`，每个阶段一个复选框）、
 `decisionApproveAt`、`decisionBlockAt`、`decisionTimeoutMs`、`decisionBudgetPerTurn`。
+决策模型从端点自己的目录中选择：OpenRouter 在
+`/api/v1/models?output_modalities=decisions` 下公开列出它的决策模型（Jev、Clef、
+Drex、Perplexity Decider 等），浏览器读取该列表时不需要 API Key。目录里没有的模型
+仍可手动输入；`decisionCatalogPath` 与 `decisionCatalogQuery` 可以把选择器指向别的
+端点或别的查询。
+这些字段同时是 host `tier-routing` 条目的 volatile 字段，改动会随配置持久化。
+表单在写入前会校验阈值与数值（与插件内部的钳制范围一致），未知的阶段名会报错而
+不是被悄悄丢弃。API Key 在表单中以掩码显示，可按需展开或清除；它以明文保存在配置
+条目中，并且仍会进入浏览器，因此 WebUI 应当被视为可信界面。表单会对非 https 的端点、
+选了阶段却没有模型、以及批准阈值低于阻断阈值这几种情况给出提示。
 `decisionModel` 留空（默认）时所有阶段关闭，零网络流量；`/tier status` 会显示
 决策模型行与实时计数器。
 

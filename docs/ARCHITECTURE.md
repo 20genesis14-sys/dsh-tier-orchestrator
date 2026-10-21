@@ -377,6 +377,31 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
   lines — tier names, the current mode, and a hint to delegate tasks needing
   tools outside the minimal set via `tier_worker` with `agentPreset: tiered`.
 
+### Tool surface in pi mode
+
+- In `promptMode: 'pi'` only `tier_worker` is registered. The other seven
+  `tier_*` tools (`tier_status`, `tier_advisor`, `tier_review`, `tier_route`,
+  `tier_configure`, `tier_escalate_effort`, `tier_sidekick`) are gated by
+  `const fullToolset = promptMode !== 'pi'` in `lib/index.js`: every
+  registered tool adds its definition to every request (all eight measured
+  at ~10.7K characters, ~3K tokens).
+- The guard denial and the smart-mode denial name `tier_worker` in pi mode,
+  because the tools they used to point at are not declared there.
+
+### Filesystem writes carry the caller's sandbox policy
+
+- The sandboxed `ctx.fs` backend fences every mutation with the CALLING
+  session's policy — mode plus workspace root — passed as the last argument
+  of `writeText`/`editText`. A caller that omits it falls back to the
+  deployment default, which ignores the session's own mode (a subagent's
+  `danger-full-access`, granted by delegation, included) and the session
+  workspace root, so writes into the project are refused.
+- `lib/minimal-fs-tools.js` and `lib/dsh/vec-cache.js` therefore resolve the
+  policy through the new `sandboxPolicy` seam (`ctx.sandboxPolicy`,
+  `resolve({ session })`) and pass it with every mutation, exactly like
+  DSH's own `write`/`edit` tools do. Without it the TurboQuant cache file
+  was refused as well, so the cache never persisted.
+
 ### `lib/minimal-fs-tools.js`
 
 - Only mounted when `promptMode === 'pi'` **and** the fs seams exist
@@ -414,6 +439,47 @@ https://openrouter.ai), `decisionPath` (default /api/alpha/decisions),
 `decisionBlockAt` thresholds, `decisionTimeoutMs`, `decisionBudgetPerTurn`.
 No model configured → every stage off → deterministic behavior unchanged.
 
+All of them are editable in the WebUI: the plugin's bundle page and the
+host-row page (`plugins.bundle.config` / `plugins.row.config` in
+`client/client.js`) render a **Decision model** section — model id, base URL,
+endpoint path, a masked API key, the enabled stages as checkboxes
+(`guard | escalate | worker | consult`), the approve/block thresholds, the
+request timeout and the per-turn call budget. The form validates the
+thresholds and the numbers before they are written, and filters the stage
+list to the known stages; the client keeps its own copy of the stage list and
+the test suite asserts it matches `DECISION_STAGES` in `lib/core/decision.js`.
+### The decision-model catalog
+
+The decision model is not a chat model: the endpoint that answers the
+questions lists its decision models in its own model catalog. OpenRouter
+publishes them under `/api/v1/models?output_modalities=decisions` (Jev, Clef,
+Drex, the Perplexity Decider, ...). The list is public, so the browser reads it
+directly — with CORS headers and without the API key of the decision endpoint.
+Two volatile fields point the picker elsewhere: `decisionCatalogPath` (default
+`/api/v1/models`) and `decisionCatalogQuery` (default
+`output_modalities=decisions&limit=100`).
+
+The query parameter is not documented by OpenRouter, so the client filters the
+answer as well: a model is a decision model when its
+`architecture.output_modalities` contains `decisions`. Entries without that
+field are kept but marked as unverified, so an endpoint that reports nothing
+still works without pretending the catalog confirmed them. A model the catalog
+does not list stays selectable, and the field falls back to free text when the
+catalog is empty or unreachable. The read is keyed by the URL: a response that
+arrives after the endpoint changed is dropped, and the new URL is read next.
+
+The client-side bounds mirror the clamps of `lib/index.js`
+(`decisionApproveAt`/`decisionBlockAt` in [0, 1], `decisionTimeoutMs` >= 500,
+`decisionBudgetPerTurn` >= 0) and an out-of-range value is reported as invalid
+instead of being written and clamped later. The API key is masked in the form
+and can be revealed or cleared there; a host that masks the stored key is
+detected and reported rather than shown as if it were the key. The mask never
+enters the staged text either, so a masked value cannot be written back over
+the real key. The key is stored in plain text in the profile entry and still
+reaches the browser, so the WebUI is a trusted surface. The form also reports a
+non-https endpoint, stages selected without a model, and an approve threshold
+below the block threshold.
+
 ### Where decisions plug in (all async seams)
 
 | Stage | Seam | Question(s) | Override semantics |
@@ -436,4 +502,11 @@ No model configured → every stage off → deterministic behavior unchanged.
   or budget beyond the first call.
 - Strict parsing: out-of-range probability, unknown choice option, missing
   answer, or non-JSON response is an error, never a silent "approved".
+- A `choice` answer that carries no `confidence` is read from its
+  `probabilities` map — but only the probability of the option it chose: the
+  loudest neighbour never turns an answer into an approval. A `score` answer
+  without a `score` falls back to its `confidence`. The endpoint may send
+  either, and both have to reach the thresholds. A probability is only a
+  number in [0, 1]: a string, a boolean or a value out of range counts as no
+  probability, never as an approval.
 - Never on the per-request hot path (`agent/request` is untouched).

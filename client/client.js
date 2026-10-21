@@ -105,6 +105,59 @@ const en = {
   reviewerEffort: 'Reviewer reasoning effort',
   roleHint: 'A role has no chain of its own: when its model is unavailable, the strong fallback chain takes over. Leave blank to use the strong route.',
 
+  decisionSection: 'Decision model (optional)',
+  decisionSectionHint: 'A decision model (Jev, Clef, OpenRouter Decisions) answers narrow questions with probabilities instead of prose. It stays off until a model is set; the deterministic policy is always the fallback.',
+  decisionOff: 'Decision model is off: the deterministic policy is used.',
+  decisionOn: 'Decision model on',
+  decisionModel: 'Decision model',
+  decisionModelHint: 'The model that answers the decision questions (e.g. typesafe/jev-1.13). Blank = every stage is off and no request leaves the machine.',
+  decisionModelPick: 'Choose a decision model…',
+  decisionModelNotListed: 'Model not listed',
+  decisionModelListed: 'Pick from list',
+  decisionModelPlaceholder: 'model id',
+  decisionCatalogLoading: 'Reading the decision-model catalog…',
+  decisionCatalogEmpty: 'The decision-model catalog is empty: the endpoint lists no decision model. Type the model id instead.',
+  decisionCatalogError: 'The decision-model catalog could not be read',
+  decisionCatalogCount: 'Decision models',
+  decisionModelUnverified: 'unverified',
+  decisionCatalogPath: 'Decision catalog path',
+  decisionCatalogPathHint: 'Path of the model catalog on the decision endpoint. Default /api/v1/models.',
+  decisionCatalogQuery: 'Decision catalog query',
+  decisionCatalogQueryHint: 'Query of the model catalog. The default filters the catalog down to the models that answer with decisions.',
+  decisionBaseUrl: 'Decision base URL',
+  decisionBaseUrlHint: 'Origin of the decision endpoint. Blank = https://openrouter.ai.',
+  decisionPath: 'Decision endpoint path',
+  decisionPathHint: 'Path of the decision endpoint. Default /api/alpha/decisions.',
+  decisionApiKey: 'Decision API key',
+  decisionApiKeyHint: 'Bearer token for the decision endpoint. It is sent only when set and stored in the tier-routing profile entry.',
+  apiKeyPlaceholder: 'not set',
+  apiKeyClear: 'Clear',
+  apiKeyHidden: 'The host hides the stored key: enter a new one to replace it.',
+  showSecret: 'Show',
+  hideSecret: 'Hide',
+  decisionStages: 'Decision stages',
+  decisionStagesHint: 'The parts of the plugin that may consult the decision model. Nothing is consulted while the model is unset, and no selected stage means the decision model is never consulted.',
+  invalidStages: 'Unknown stage name: pick the stages from the list.',
+  decisionStageGuard: 'Guard: second-stage check of a high-impact tool denial',
+  decisionStageEscalate: 'Escalate: failure triage before the automatic escalation',
+  decisionStageWorker: 'Worker: tier choice for tier_worker / tier_sidekick',
+  decisionStageConsult: 'Consult: gating of advisor and reviewer consultations',
+  decisionStagesWithoutModel: 'Stages are selected, but no decision model is set: they stay inactive.',
+  decisionApproveAt: 'Approve threshold',
+  decisionApproveAtHint: 'A probability in [0, 1]. Every answer at or above it counts as an approval.',
+  decisionBlockAt: 'Block threshold',
+  decisionBlockAtHint: 'A probability in [0, 1]. An answer at or below it blocks the action.',
+  decisionTimeoutMs: 'Decision timeout (ms)',
+  decisionTimeoutMsHint: 'Whole number, at least 500. A timeout leaves the deterministic behavior in place.',
+  decisionBudgetPerTurn: 'Decision calls per turn',
+  decisionBudgetPerTurnHint: 'Whole number, no upper limit. The decision calls one turn may spend per agent.',
+  decisionThresholdOrder: 'The approve threshold is below the block threshold, so a low answer counts as a block.',
+  decisionInsecureEndpoint: 'The endpoint is not https: the API key would travel in plain text.',
+  invalidProbability: 'Enter a number between 0 and 1.',
+  invalidNumber: 'Enter a whole number.',
+  promptProfile: 'Prompt profile',
+  promptProfileHint: 'standard | pi. The prompt profile new sessions of this preset start with.',
+
   catalogLoading: 'Reading the model catalog…',
   catalogEmpty: 'The model catalog is empty: no provider has registered models yet. Press Refresh after the providers finish loading.',
   catalogError: 'The model catalog could not be read',
@@ -185,6 +238,59 @@ const zh = {
   reviewerRoute: '审查模型',
   reviewerEffort: '审查推理强度',
   roleHint: '角色没有自己的降级链：其模型不可用时，接管的是强档降级链。留空则走强档路由。',
+
+  decisionSection: '决策模型（可选）',
+  decisionSectionHint: '决策模型（Jev、Clef、OpenRouter Decisions）用概率回答窄问题，而不是生成文本。未设置模型前它保持关闭，确定性策略始终是兜底。',
+  decisionOff: '决策模型已关闭：使用确定性策略。',
+  decisionOn: '决策模型已开启',
+  decisionModel: '决策模型',
+  decisionModelHint: '回答决策问题的模型（如 typesafe/jev-1.13）。留空 = 所有阶段关闭，不产生任何网络请求。',
+  decisionModelPick: '选择决策模型…',
+  decisionModelNotListed: '未列出的模型',
+  decisionModelListed: '从列表选择',
+  decisionModelPlaceholder: '模型 id',
+  decisionCatalogLoading: '正在读取决策模型目录…',
+  decisionCatalogEmpty: '决策模型目录为空：该端点没有列出任何决策模型。请直接输入模型 id。',
+  decisionCatalogError: '无法读取决策模型目录',
+  decisionCatalogCount: '决策模型',
+  decisionModelUnverified: '未确认',
+  decisionCatalogPath: '决策模型目录路径',
+  decisionCatalogPathHint: '决策端点上的模型目录路径。默认 /api/v1/models。',
+  decisionCatalogQuery: '决策模型目录查询',
+  decisionCatalogQueryHint: '模型目录的查询串。默认值会把目录过滤为以 decisions 输出的模型。',
+  decisionBaseUrl: '决策 Base URL',
+  decisionBaseUrlHint: '决策端点的来源。留空 = https://openrouter.ai。',
+  decisionPath: '决策端点路径',
+  decisionPathHint: '决策端点的路径。默认 /api/alpha/decisions。',
+  decisionApiKey: '决策 API Key',
+  decisionApiKeyHint: '决策端点的 Bearer 令牌。仅在设置后发送，保存在 tier-routing 配置条目中。',
+  apiKeyPlaceholder: '未设置',
+  apiKeyClear: '清除',
+  apiKeyHidden: '宿主会隐藏已保存的 Key：如需更换请重新输入。',
+  showSecret: '显示',
+  hideSecret: '隐藏',
+  decisionStages: '决策阶段',
+  decisionStagesHint: '允许咨询决策模型的插件环节。未设置模型时不会发起任何咨询；一个阶段都没选时，决策模型永远不会被咨询。',
+  invalidStages: '存在未知的阶段名：请从列表中选择。',
+  decisionStageGuard: 'Guard：对高影响工具拒绝做二次判定',
+  decisionStageEscalate: 'Escalate：自动升级前的失败归因',
+  decisionStageWorker: 'Worker：为 tier_worker / tier_sidekick 选择档位',
+  decisionStageConsult: 'Consult：控制顾问与审查咨询',
+  decisionStagesWithoutModel: '已选择阶段，但没有设置决策模型：它们不会生效。',
+  decisionApproveAt: '批准阈值',
+  decisionApproveAtHint: '[0, 1] 之间的概率。等于或高于该值的答案都算批准。',
+  decisionBlockAt: '阻断阈值',
+  decisionBlockAtHint: '[0, 1] 之间的概率。等于或低于该值的答案会阻断该动作。',
+  decisionTimeoutMs: '决策超时（毫秒）',
+  decisionTimeoutMsHint: '整数，至少 500。超时后保持确定性行为。',
+  decisionBudgetPerTurn: '每轮决策调用次数',
+  decisionBudgetPerTurnHint: '整数，无上限。每个代理每轮可消耗的决策调用次数。',
+  decisionThresholdOrder: '批准阈值低于阻断阈值：偏低的答案会被当作阻断处理。',
+  decisionInsecureEndpoint: '端点不是 https：API Key 将以明文传输。',
+  invalidProbability: '请输入 0 到 1 之间的数字。',
+  invalidNumber: '请输入整数。',
+  promptProfile: 'Prompt 预设',
+  promptProfileHint: 'standard | pi。本预设新建会话时使用的 prompt 预设。',
 
   catalogLoading: '正在读取模型目录…',
   catalogEmpty: '模型目录为空：还没有供应商注册模型。供应商加载完成后点击“刷新”。',
@@ -324,6 +430,144 @@ function createCatalog(ctx) {
   return { state, load }
 }
 
+// ---- decision model catalog ------------------------------------------------
+//
+// The decision models of an endpoint are listed by its model catalog. The
+// OpenRouter default is the public models catalog, filtered down to the
+// models that answer with decisions: the request carries no API key, because
+// the catalog is public.
+
+const DECISION_CATALOG_BASE = 'https://openrouter.ai'
+const DECISION_CATALOG_PATH = '/api/v1/models'
+const DECISION_CATALOG_QUERY = 'output_modalities=decisions&limit=100'
+
+/**
+ * Normalize a models catalog into the decision models it lists. A decision
+ * model announces itself in its output modalities; entries without that field
+ * are kept, so an endpoint that reports nothing still works.
+ * @param value - the catalog value, or undefined before the first read.
+ * @returns { models, count }.
+ */
+function decisionCatalogView(value) {
+  let list = []
+  if (Array.isArray(value)) list = value
+  else if (value && Array.isArray(value.data)) list = value.data
+  else if (value && Array.isArray(value.models)) list = value.models
+  const models = []
+  for (const raw of list) {
+    if (!raw || typeof raw.id !== 'string' || raw.id === '') continue
+    const architecture = raw.architecture && typeof raw.architecture === 'object' ? raw.architecture : null
+    const outputs = architecture && Array.isArray(architecture.output_modalities) ? architecture.output_modalities : null
+    if (outputs && outputs.indexOf('decisions') === -1) continue
+    // An entry without the modality may or may not answer with decisions: the
+    // catalog did not say, so the picker says so too.
+    const verified = !!outputs && outputs.indexOf('decisions') !== -1
+    const pricing = raw.pricing && typeof raw.pricing === 'object' ? raw.pricing : null
+    // The catalog reports the price per token, as a number or as a string.
+    // A negative price means "not a per-token price" (a router): no price.
+    const raw_price = pricing ? pricing.prompt : null
+    let prompt = NaN
+    if (typeof raw_price === 'number') prompt = raw_price
+    else if (typeof raw_price === 'string' && raw_price.trim() !== '') prompt = Number(raw_price)
+    const price = isFinite(prompt) && prompt >= 0 ? prompt : null
+    models.push({
+      id: raw.id,
+      name: typeof raw.name === 'string' && raw.name ? raw.name : raw.id,
+      description: typeof raw.description === 'string' ? raw.description : '',
+      pricePerMTok: price === null ? null : Math.round(price * 1000000 * 1000) / 1000,
+      contextLength: typeof raw.context_length === 'number' ? raw.context_length : null,
+      verified: verified,
+    })
+  }
+  return { models: models, count: models.length }
+}
+
+/**
+ * The catalog URL of the configured endpoint, path and query.
+ * @param config - { baseUrl, path, query }.
+ */
+function decisionCatalogUrl(config) {
+  const src = config && typeof config === 'object' ? config : {}
+  const base = String(src.baseUrl || '').trim().replace(/\/+$/, '') || DECISION_CATALOG_BASE
+  const path = String(src.path || '').trim() || DECISION_CATALOG_PATH
+  let query = String(src.query || '').trim().replace(/^\?/, '')
+  // The OpenRouter catalog only lists the decision models when it is asked
+  // for them; another endpoint keeps the query the user configured.
+  if (query === '' && base === DECISION_CATALOG_BASE) query = DECISION_CATALOG_QUERY
+  const url = base + (path.charAt(0) === '/' ? path : '/' + path)
+  return query ? url + '?' + query : url
+}
+
+/**
+ * The decision-model catalog as shared state. A ready catalog is kept until
+ * the endpoint changes or a refresh is asked for.
+ * @param fetchImpl - the fetch to use (default: the global one).
+ */
+function createDecisionCatalog(fetchImpl) {
+  const state = observable({ status: 'idle', view: decisionCatalogView(undefined), error: null, url: '' })
+  let inflight = null
+  let lastConfig = null
+  let seq = 0
+  function load(config, force) {
+    if (config) lastConfig = config
+    const url = decisionCatalogUrl(lastConfig)
+    if (inflight !== null) {
+      // A request is running: remember that another URL is wanted, so the
+      // next read follows the endpoint the user configured.
+      if (inflight.url !== url) { inflight.again = url; inflight.stale = true }
+      return inflight.promise
+    }
+    const current = state.getSnapshot()
+    if (!force && current.status === 'ready' && current.url === url) return Promise.resolve()
+    const mine = ++seq
+    state.set({ status: 'loading', view: current.view, error: null, url: url })
+    const record = { url: url, again: null, stale: false, promise: null }
+    record.promise = (async () => {
+      try {
+        const doFetch = typeof fetchImpl === 'function'
+          ? fetchImpl
+          : (typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null)
+        if (!doFetch) throw new Error('fetch is unavailable')
+        // No Authorization header: the catalog is public, and the key of the
+        // decision endpoint never leaves the form.
+        const res = await doFetch(url, { headers: { accept: 'application/json' } })
+        if (!res || res.ok !== true) throw new Error(res && res.status ? 'HTTP ' + res.status : 'request failed')
+        const body = await res.json()
+        const view = decisionCatalogView(body)
+        if (mine !== seq || record.stale) return
+        state.set({ status: view.count > 0 ? 'ready' : 'empty', view: view, error: null, url: url })
+      } catch (error) {
+        if (mine !== seq || record.stale) return
+        state.set({ status: 'error', view: current.view, error: String(error && error.message || error), url: url })
+      } finally {
+        if (inflight === record) {
+          inflight = null
+          if (record.again && record.again !== record.url) {
+            // The endpoint changed while the request was running: read the
+            // new one now.
+            load(null, false)
+          }
+        }
+      }
+    })()
+    inflight = record
+    return record.promise
+  }
+  return { state: state, load: load }
+}
+
+/**
+ * The catalog settings of the form: the endpoint, the path and the query.
+ * @param state - the staged form state.
+ */
+function decisionCatalogConfig(state) {
+  return {
+    baseUrl: textOf(state, 'decisionBaseUrl'),
+    path: textOf(state, 'decisionCatalogPath'),
+    query: textOf(state, 'decisionCatalogQuery'),
+  }
+}
+
 // ---- field specs -----------------------------------------------------------
 // SettingsFormModel stages plain text per field; these specs convert between
 // the stored value and the draft text (the primitives ship text/number
@@ -375,6 +619,111 @@ function chainField(field) {
   }
 }
 
+/**
+ * The stages a decision model may be consulted at. Mirrors
+ * DECISION_STAGES in lib/core/decision.js; the client bundle cannot import
+ * server modules, so the parity is asserted by the test suite.
+ */
+const DECISION_STAGES = ['guard', 'escalate', 'worker', 'consult']
+
+/**
+ * Parse a stage list out of staged text: a JSON array or a comma-separated
+ * list. An unknown stage name is a mistake, not something to drop silently:
+ * the whole list is rejected, so the form can ask for a correction.
+ * @param text - the staged text.
+ * @returns the stage list, or null when the text is not a list of known stages.
+ */
+function parseStageList(text) {
+  const raw = String(text === undefined || text === null ? '' : text).trim()
+  if (raw === '') return []
+  let list
+  if (raw.charAt(0) === '[') {
+    try { list = JSON.parse(raw) } catch (e) { return null }
+    if (!Array.isArray(list)) return null
+  } else {
+    list = raw.split(',')
+  }
+  const out = []
+  for (const item of list) {
+    if (typeof item !== 'string') return null
+    const stage = item.trim()
+    if (stage === '') continue
+    if (DECISION_STAGES.indexOf(stage) === -1) return null
+    if (out.indexOf(stage) === -1) out.push(stage)
+  }
+  return out
+}
+
+/**
+ * The enabled-stage list as a field: a JSON array in the staged text, a
+ * filtered stage list on the way out. An empty selection clears the field,
+ * which the schema stores as the default `[]` — no stage, so the decision
+ * model is never consulted.
+ * @param field - the settings field name.
+ */
+function stageListField(field) {
+  return {
+    field,
+    format: (v) => (Array.isArray(v) && v.length ? JSON.stringify(v) : ''),
+    parse: (text) => {
+      const t = String(text).trim()
+      if (t === '') return { kind: 'clear' }
+      const list = parseStageList(t)
+      if (list === null) return undefined
+      if (list.length === 0) return { kind: 'clear' }
+      return { kind: 'set', value: list }
+    },
+  }
+}
+
+/**
+ * The secret field: a string that is masked in the UI. An empty value means
+ * "no key" (the same convention the other text fields use), and the Clear
+ * button makes the removal an explicit act.
+ * @param field - the settings field name.
+ */
+function secretField(field) {
+  return {
+    field,
+    // A host that masks the stored key must never put the mask into the
+    // staged text: it would be written back over the real key.
+    format: (v) => (typeof v === 'string' && !isHiddenSecret(v) ? v : ''),
+    parse: (text) => {
+      const t = String(text)
+      if (isHiddenSecret(t)) return undefined
+      if (t === '') return { kind: 'clear' }
+      return { kind: 'set', value: t }
+    },
+  }
+}
+
+/**
+ * A number field with a range. Out-of-range, fractional (for integer
+ * fields) or non-numeric text is invalid, so the form never writes a value
+ * the plugin would have to clamp.
+ * @param field - the settings field name.
+ * @param opts - { min, max, integer }.
+ */
+function boundedNumberField(field, opts) {
+  const options = opts && typeof opts === 'object' ? opts : {}
+  const min = typeof options.min === 'number' ? options.min : -Infinity
+  const max = typeof options.max === 'number' ? options.max : Infinity
+  const integer = options.integer === true
+  return {
+    field,
+    format: (v) => (typeof v === 'number' && isFinite(v) ? String(v) : ''),
+    parse: (text) => {
+      const t = String(text).trim()
+      if (t === '') return { kind: 'clear' }
+      const n = Number(t)
+      if (!isFinite(n)) return undefined
+      if (integer && Math.floor(n) !== n) return undefined
+      if (n < min || n > max) return undefined
+      return { kind: 'set', value: n }
+    },
+  }
+}
+
 const SPECS = [
   enumField('mode', ['auto', 'strong', 'cheap', 'delegated', 'off', 'smart']),
   boolField('threeTiers'),
@@ -414,6 +763,19 @@ const SPECS = [
   P.settingsNumberField('advisorMaxCallsPerTurn'),
   P.settingsNumberField('advisorConfirmTimeoutSec'),
   boolField('forceTierOnExplicitModel'),
+  // Decision model (opt-in): the stages are off until a model is set.
+  P.settingsTextField('decisionModel'),
+  P.settingsTextField('decisionBaseUrl'),
+  P.settingsTextField('decisionPath'),
+  secretField('decisionApiKey'),
+  P.settingsTextField('decisionCatalogPath'),
+  P.settingsTextField('decisionCatalogQuery'),
+  stageListField('decisionStages'),
+  boundedNumberField('decisionApproveAt', { min: 0, max: 1 }),
+  boundedNumberField('decisionBlockAt', { min: 0, max: 1 }),
+  boundedNumberField('decisionTimeoutMs', { min: 500, integer: true }),
+  boundedNumberField('decisionBudgetPerTurn', { min: 0, integer: true }),
+  enumField('promptProfile', ['standard', 'pi']),
 ]
 
 /** Locale keys of each route slot: [route label, effort label]. */
@@ -459,14 +821,14 @@ function textOf(state, key) {
 
 /** Plain staged text control: the shared settings field for booleans, chains, mode and policy. */
 function TextField(props) {
-  const { t, state, fieldKey, labelKey, hintKey, disabled, invalidJson } = props
+  const { t, state, fieldKey, labelKey, hintKey, disabled, invalidJson, invalidKey } = props
   return h(P.SettingsValueField, {
     id: fieldId(fieldKey),
     label: t(labelKey || fieldKey),
     hint: t(hintKey),
     overriddenLabel: t('overridden'),
     resetLabel: t('reset'),
-    invalidLabel: t(invalidJson ? 'invalidJson' : 'invalid'),
+    invalidLabel: t(invalidKey || (invalidJson ? 'invalidJson' : 'invalid')),
     disabled,
     ...state[fieldKey],
     onEdit: (text) => props.edit(fieldKey, text),
@@ -501,6 +863,128 @@ function CatalogStatus(props) {
       ? h('div', { style: { marginTop: 6 } },
         h('div', { style: captionStyle }, t('failuresTitle')),
         ...view.failures.map((f) => h('div', { key: f.id, style: { ...captionStyle, color: 'var(--dsw-alias-state-error-primary)' } }, f.name + ': ' + f.message)))
+      : null)
+}
+
+/**
+ * A value a host uses to hide a stored secret ('***', 'REDACTED', ...).
+ * The match is exact: a real key that merely contains such a token stays a
+ * real key.
+ * @param value - the value the settings scope returned.
+ */
+function isHiddenSecret(value) {
+  const v = String(value === undefined || value === null ? '' : value).trim()
+  if (v === '') return false
+  return /^(redacted|hidden|<hidden>|\*+|\u2022+|\u2026+)$/i.test(v)
+}
+
+/**
+ * Secret text: the value is masked and revealed on demand. The value stays
+ * in the staged form state, so an untouched field is written back unchanged.
+ * A host that masks the stored key is reported instead of being mistaken for
+ * a real key.
+ */
+function SecretField(props) {
+  const { t, state, fieldKey, labelKey, hintKey, disabled } = props
+  const [revealed, setRevealed] = useState(false)
+  const stored = textOf(state, fieldKey)
+  const hidden = isHiddenSecret(stored)
+  const value = hidden ? '' : stored
+  const overridden = !!(state[fieldKey] && state[fieldKey].overridden)
+  return h('div', { style: { margin: '2px 0 10px' } },
+    FieldHeader({
+      id: fieldId(fieldKey),
+      label: t(labelKey),
+      overridden,
+      overriddenLabel: t('overridden'),
+      action: h('span', null,
+        h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: () => setRevealed(!revealed) }, t(revealed ? 'hideSecret' : 'showSecret')),
+        h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: () => props.edit(fieldKey, '') }, t('apiKeyClear')),
+        overridden ? h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: () => props.resetField(fieldKey) }, t('reset')) : null),
+    }),
+    h('input', {
+      id: fieldId(fieldKey),
+      type: revealed ? 'text' : 'password',
+      value,
+      disabled,
+      placeholder: hidden ? t('apiKeyHidden') : t('apiKeyPlaceholder'),
+      style: inputStyle,
+      onChange: (event) => props.edit(fieldKey, event.target.value),
+    }),
+    h('p', { style: { ...captionStyle, margin: '4px 0 0' } }, t(hintKey)))
+}
+
+/**
+ * The decision stages as checkboxes: the enabled list of the decision model.
+ * Toggling one rewrites the staged field as a JSON array.
+ */
+function StagesField(props) {
+  const { t, state, fieldKey, disabled } = props
+  const raw = textOf(state, fieldKey)
+  const parsed = parseStageList(raw)
+  const list = parsed || []
+  const invalid = raw.trim() !== '' && parsed === null
+  const overridden = !!(state[fieldKey] && state[fieldKey].overridden)
+  const toggle = (stage) => () => {
+    const next = list.indexOf(stage) === -1
+      ? DECISION_STAGES.filter((s) => list.indexOf(s) !== -1 || s === stage)
+      : list.filter((s) => s !== stage)
+    props.edit(fieldKey, JSON.stringify(next))
+  }
+  return h('div', { style: { margin: '2px 0 10px' } },
+    FieldHeader({
+      id: fieldId(fieldKey),
+      label: t('decisionStages'),
+      overridden,
+      overriddenLabel: t('overridden'),
+      action: overridden ? h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: () => props.resetField(fieldKey) }, t('reset')) : null,
+    }),
+    ...DECISION_STAGES.map((stage) => h('label', {
+      key: stage,
+      style: {
+        display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 4,
+        color: 'var(--dsh-alias-label-secondary)',
+      },
+    },
+      h('input', { type: 'checkbox', checked: list.indexOf(stage) !== -1, disabled, onChange: toggle(stage) }),
+      h('span', null, t('decisionStage' + stage.charAt(0).toUpperCase() + stage.slice(1))))),
+    h('p', { style: { ...captionStyle, margin: '4px 0 0' } }, t('decisionStagesHint')),
+    invalid
+      ? h('p', { style: { ...captionStyle, margin: '4px 0 0', color: 'var(--dsh-alias-state-error-primary)' } }, t('invalidStages'))
+      : null)
+}
+
+/** One line: whether the decision model is configured, and how many stages are on. */
+function DecisionStatus(props) {
+  const { t, state } = props
+  const model = textOf(state, 'decisionModel')
+  const stages = parseStageList(textOf(state, 'decisionStages')) || []
+  const line = model === ''
+    ? t('decisionOff')
+    : t('decisionOn') + ': ' + model + ' \u00b7 stages ' + stages.length + '/' + DECISION_STAGES.length
+  const approveText = textOf(state, 'decisionApproveAt')
+  const blockText = textOf(state, 'decisionBlockAt')
+  const approve = Number(approveText)
+  const block = Number(blockText)
+  const inverted = approveText !== '' && blockText !== '' && isFinite(approve) && isFinite(block) && approve < block
+  const baseUrl = textOf(state, 'decisionBaseUrl').trim()
+  const insecure = baseUrl !== '' && !/^https:\/\//i.test(baseUrl)
+  return h('div', { style: { margin: '0 0 10px' } },
+    h('p', {
+      style: {
+        ...captionStyle,
+        margin: '0',
+        color: model === '' ? 'var(--dsh-alias-label-tertiary)' : 'var(--dsh-alias-label-secondary)',
+      },
+    }, line),
+    model === '' && stages.length > 0
+      ? h('p', { style: { ...captionStyle, margin: '4px 0 0', color: 'var(--dsh-alias-state-error-primary)' } }, t('decisionStagesWithoutModel'))
+      : null,
+    inverted
+      ? h('p', { style: { ...captionStyle, margin: '4px 0 0', color: 'var(--dsh-alias-state-error-primary)' } }, t('decisionThresholdOrder'))
+      : null,
+    insecure
+      ? h('p', { style: { ...captionStyle, margin: '4px 0 0', color: 'var(--dsh-alias-state-error-primary)' } }, t('decisionInsecureEndpoint'))
       : null)
 }
 
@@ -596,19 +1080,96 @@ function RouteField(props) {
     h('p', { style: { ...captionStyle, margin: '4px 0 0' } }, t('effortHint')))
 }
 
+/**
+ * The decision model: a dropdown over the catalog of the endpoint, with a
+ * free-text fallback for a model the catalog does not list.
+ */
+function DecisionModelField(props) {
+  const { t, state, disabled, customOn, onToggleCustom, edit, resetField } = props
+  // The card passes both catalogs; this field is about the decision one.
+  const catalog = props.decisionCatalog || props.catalog
+  const fieldKey = props.fieldKey || 'decisionModel'
+  const value = textOf(state, fieldKey)
+  const view = catalog && catalog.view ? catalog.view : decisionCatalogView(undefined)
+  const status = catalog ? catalog.status : 'idle'
+  const hasCatalog = view.count > 0
+  const loading = status === 'loading'
+  const typing = customOn || (!hasCatalog && !loading)
+  const listed = hasCatalog && view.models.some((model) => model.id === value)
+  const overridden = !!(state.decisionModel && state.decisionModel.overridden)
+  const priceOf = (model) => (model.pricePerMTok === null ? '' : ' \u00b7 $' + (Math.round(model.pricePerMTok * 1000) / 1000) + '/1M')
+
+  const control = typing
+    ? h('input', {
+      id: fieldId('decisionModel'), type: 'text', value, disabled,
+      placeholder: t('decisionModelPlaceholder'), style: inputStyle,
+      onChange: (event) => edit('decisionModel', event.target.value),
+    })
+    : h('select', {
+      id: fieldId('decisionModelRoute'), value, disabled: disabled || loading, style: inputStyle,
+      onChange: (event) => edit('decisionModel', event.target.value),
+    },
+      h('option', { value: '' }, t('decisionModelPick')),
+      value !== '' && !listed ? h('option', { value: value }, value) : null,
+      ...view.models.map((model) => h('option', { key: model.id, value: model.id },
+        (model.name === model.id ? model.id : model.name + ' \u00b7 ' + model.id) + priceOf(model) + (model.verified ? '' : ' \u00b7 ' + t('decisionModelUnverified')))))
+
+  const toggle = hasCatalog && onToggleCustom
+    ? h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: onToggleCustom }, t(customOn ? 'decisionModelListed' : 'decisionModelNotListed'))
+    : null
+  const reset = overridden
+    ? h('button', { type: 'button', style: linkButtonStyle, disabled, onClick: () => resetField('decisionModel') }, t('reset'))
+    : null
+
+  const statusLine = status === 'loading' ? t('decisionCatalogLoading')
+    : status === 'error' ? t('decisionCatalogError') + (catalog && catalog.error ? ': ' + catalog.error : '')
+      : status === 'empty' ? t('decisionCatalogEmpty')
+        : status === 'ready' ? t('decisionCatalogCount') + ': ' + view.count
+          : ''
+
+  return h('div', { style: { margin: '2px 0 10px' } },
+    FieldHeader({
+      id: fieldId('decisionModelRoute'),
+      label: t('decisionModel'),
+      overridden,
+      overriddenLabel: t('overridden'),
+      action: h('span', null, toggle, reset),
+    }),
+    control,
+    statusLine
+      ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 0' } },
+        h('span', {
+          style: {
+            fontSize: 12, flex: 1,
+            color: status === 'error' || status === 'empty' ? 'var(--dsh-alias-state-error-primary)' : 'var(--dsh-alias-label-tertiary)',
+          },
+        }, statusLine),
+        h('button', { type: 'button', style: linkButtonStyle, disabled: status === 'loading', onClick: props.refreshCatalog }, t('refresh')))
+      : null,
+    h('p', { style: { ...captionStyle, margin: '4px 0 0' } }, t('decisionModelHint')))
+}
+
 /** One-liner on a card, or the staged settings form. */
 function TierRoutingCard(props) {
   const t = props.t
   const state = props.useTierRoutingCard((snapshot) => snapshot)
   const catalog = props.useModelCatalog((snapshot) => snapshot)
-  const [custom, setCustom] = useState({ strong: false, main: false, cheap: false, advisor: false, reviewer: false, sidekickExplore: false, sidekickImplement: false, sidekickFix: false })
+  const decisionCatalog = props.useDecisionCatalog
+    ? props.useDecisionCatalog((snapshot) => snapshot)
+    : { status: 'idle', view: decisionCatalogView(undefined), error: null, url: '' }
+  const [custom, setCustom] = useState({ strong: false, main: false, cheap: false, advisor: false, reviewer: false, sidekickExplore: false, sidekickImplement: false, sidekickFix: false, decision: false })
   const loadCatalog = props.loadCatalog
   useEffect(() => {
     if (props.view !== 'summary') loadCatalog()
   }, [])
+  useEffect(() => {
+    if (props.view !== 'summary' && props.loadDecisionCatalog) {
+      props.loadDecisionCatalog(decisionCatalogConfig(state))
+    }
+  }, [props.view])
   if (props.view === 'summary') return t('description')
   const disabled = !state.writable
-  const common = { t, state, catalog, disabled, edit: props.edit, resetField: props.resetField }
+  const common = { t, state, catalog, decisionCatalog, disabled, edit: props.edit, resetField: props.resetField }
   const toggleCustom = (tier) => () => setCustom((current) => ({ ...current, [tier]: !current[tier] }))
   return h(P.SettingsForm, {
     labels: formLabels(t),
@@ -628,6 +1189,29 @@ function TierRoutingCard(props) {
     h(TextField, { ...common, fieldKey: 'rolesEnabled', labelKey: 'rolesEnabled', hintKey: 'rolesHint' }),
     h(RouteField, { ...common, tier: 'advisor', customOn: custom.advisor, onToggleCustom: toggleCustom('advisor') }),
     h(RouteField, { ...common, tier: 'reviewer', customOn: custom.reviewer, onToggleCustom: toggleCustom('reviewer') }),
+    h('p', { style: { ...captionStyle, margin: '14px 0 2px', fontWeight: 600 } }, t('decisionSection')),
+    h('p', { style: { ...captionStyle, margin: '0 0 8px' } }, t('decisionSectionHint')),
+    h(DecisionStatus, { t, state }),
+    h(DecisionModelField, {
+      ...common,
+      catalog: decisionCatalog,
+      fieldKey: 'decisionModel',
+      customOn: custom.decision,
+      onToggleCustom: toggleCustom('decision'),
+      refreshCatalog: () => {
+        if (props.loadDecisionCatalog) props.loadDecisionCatalog(decisionCatalogConfig(state), true)
+      },
+    }),
+    h(TextField, { ...common, fieldKey: 'decisionBaseUrl', labelKey: 'decisionBaseUrl', hintKey: 'decisionBaseUrlHint' }),
+    h(TextField, { ...common, fieldKey: 'decisionPath', labelKey: 'decisionPath', hintKey: 'decisionPathHint' }),
+    h(SecretField, { ...common, fieldKey: 'decisionApiKey', labelKey: 'decisionApiKey', hintKey: 'decisionApiKeyHint' }),
+    h(StagesField, { ...common, fieldKey: 'decisionStages' }),
+    h(TextField, { ...common, fieldKey: 'decisionApproveAt', labelKey: 'decisionApproveAt', hintKey: 'decisionApproveAtHint', invalidKey: 'invalidProbability' }),
+    h(TextField, { ...common, fieldKey: 'decisionBlockAt', labelKey: 'decisionBlockAt', hintKey: 'decisionBlockAtHint', invalidKey: 'invalidProbability' }),
+    h(TextField, { ...common, fieldKey: 'decisionTimeoutMs', labelKey: 'decisionTimeoutMs', hintKey: 'decisionTimeoutMsHint', invalidKey: 'invalidNumber' }),
+    h(TextField, { ...common, fieldKey: 'decisionBudgetPerTurn', labelKey: 'decisionBudgetPerTurn', hintKey: 'decisionBudgetPerTurnHint', invalidKey: 'invalidNumber' }),
+    h(TextField, { ...common, fieldKey: 'decisionCatalogPath', labelKey: 'decisionCatalogPath', hintKey: 'decisionCatalogPathHint' }),
+    h(TextField, { ...common, fieldKey: 'decisionCatalogQuery', labelKey: 'decisionCatalogQuery', hintKey: 'decisionCatalogQueryHint' }),
     h(TextField, { ...common, fieldKey: 'subagentPolicy', labelKey: 'subagentPolicy', hintKey: 'policyHint' }),
     h(TextField, { ...common, fieldKey: 'spawnPolicy', labelKey: 'spawnPolicy', hintKey: 'spawnPolicyHint' }),
     h(TextField, { ...common, fieldKey: 'forkPolicy', labelKey: 'forkPolicy', hintKey: 'forkPolicyHint' }),
@@ -640,7 +1224,8 @@ function TierRoutingCard(props) {
     h(RouteField, { ...common, tier: 'sidekickFix', customOn: custom.sidekickFix, onToggleCustom: toggleCustom('sidekickFix') }),
     h(TextField, { ...common, fieldKey: 'advisorMaxCallsPerTurn', labelKey: 'advisorMaxCallsPerTurn', hintKey: 'advisorMaxCallsPerTurnHint' }),
     h(TextField, { ...common, fieldKey: 'advisorConfirmTimeoutSec', labelKey: 'advisorConfirmTimeoutSec', hintKey: 'advisorConfirmTimeoutSecHint' }),
-    h(TextField, { ...common, fieldKey: 'forceTierOnExplicitModel', labelKey: 'forceTierOnExplicitModel', hintKey: 'forceTierOnExplicitModelHint' }))
+    h(TextField, { ...common, fieldKey: 'forceTierOnExplicitModel', labelKey: 'forceTierOnExplicitModel', hintKey: 'forceTierOnExplicitModelHint' }),
+    h(TextField, { ...common, fieldKey: 'promptProfile', labelKey: 'promptProfile', hintKey: 'promptProfileHint' }))
 }
 
 /** Staged form over the `tier-routing` settings namespace. */
@@ -776,15 +1361,24 @@ function apply(ctx) {
     ctx.remote.$on('llm/adapters-updated', () => { catalog.load(true) }),
     ctx.remote.$on('settings/document-updated', () => { catalog.load(true) }),
   ], 'dsh-tier-orchestrator: catalog invalidations')
+
+  // The decision-model catalog: a public list, read from the browser without
+  // the API key of the decision endpoint.
+  const decisionCatalog = createDecisionCatalog()
+  ctx.effect(() => [
+    ctx.remote.$on('llm/adapters-updated', () => { decisionCatalog.load(null, true) }),
+    ctx.remote.$on('settings/document-updated', () => { decisionCatalog.load(null, true) }),
+  ], 'dsh-tier-orchestrator: decision catalog invalidations')
   ctx.on('connection/reset', () => { catalog.load(true) })
 
   const face = () => {
     const base = card.inject()
     return {
       ...base,
-      hooks: { ...base.hooks, modelCatalog: catalog.state },
+      hooks: { ...base.hooks, modelCatalog: catalog.state, decisionCatalog: decisionCatalog.state },
       loadCatalog: () => { catalog.load(false) },
       refreshCatalog: () => { catalog.load(true) },
+      loadDecisionCatalog: (config, force) => { decisionCatalog.load(config, force === true) },
     }
   }
 
@@ -850,5 +1444,21 @@ exports.catalogView = catalogView
 exports.effortChoices = effortChoices
 exports.createCatalog = createCatalog
 exports.TierRoutingCard = TierRoutingCard
+exports.DECISION_STAGES = DECISION_STAGES
+exports.decisionCatalogView = decisionCatalogView
+exports.decisionCatalogUrl = decisionCatalogUrl
+exports.createDecisionCatalog = createDecisionCatalog
+exports.DecisionModelField = DecisionModelField
+exports.SPECS = SPECS
+exports.locales = { en, zh }
+exports.TextField = TextField
+exports.DecisionStatus = DecisionStatus
+exports.parseStageList = parseStageList
+exports.stageListField = stageListField
+exports.secretField = secretField
+exports.isHiddenSecret = isHiddenSecret
+exports.boundedNumberField = boundedNumberField
+exports.StagesField = StagesField
+exports.SecretField = SecretField
 return module.exports;
 }});

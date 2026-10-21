@@ -2,6 +2,72 @@
 
 All notable changes to dsh-tier-orchestrator are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- **Minimal (`pi`) prompt mode registers only `tier_worker`.** The seven
+  other `tier_*` tools are registered in the standard preset only: every
+  registered tool adds its definition to every request. The guard denial and
+  the smart-mode denial now name `tier_worker` in pi mode.
+- **Plugin filesystem writes carry the caller's sandbox policy.** The minimal
+  `read`/`write`/`edit` tools and the TurboQuant cache called the sandboxed
+  `ctx.fs` backend without a policy, so every write was fenced against the
+  deployment default — ignoring the session's own mode and workspace root and
+  refusing writes inside the project. Both now resolve
+  `ctx.sandboxPolicy.resolve({ session })` and pass it with every mutation,
+  so writes follow the session's mode, including a subagent's
+  `danger-full-access` in smart mode.
+
+- **`/tier plan` no longer rewrites the session routing mode to `auto`.** It
+  enters plan mode and routes the plan to the plan tier, keeping `smart`,
+  `auto`, or an explicit tier; only `off`/`delegated` sessions switch to
+  `auto`, since without routing the plan would stay on the baseline model.
+- **`/tier status` shows the `smart:` line only when smart is the effective
+  mode** — a per-session override (e.g. `auto`) no longer reports the global
+  smart pin as if it were active.
+
+### Added
+
+- **Decision models are picked from a catalog.** The decision-model field is a
+  dropdown over the catalog of the endpoint: OpenRouter lists its decision
+  models (Jev, Clef, Drex, the Perplexity Decider, ...) under
+  `/api/v1/models?output_modalities=decisions`, a public list the browser
+  reads without the API key. A model the catalog does not list stays
+  selectable, and the field falls back to free text when the catalog is empty
+  or unreachable. The new volatile fields `decisionCatalogPath` and
+  `decisionCatalogQuery` point the picker at another endpoint or query. The
+  client filters the answer by `architecture.output_modalities` as well, so
+  the picker survives an undocumented query parameter.
+
+### Fixed
+
+- **Decision answers that carry no `confidence` are read.** A `choice`
+  answer with only a `probabilities` map now contributes the probability of
+  the option it chose (never the loudest neighbour), and a `score` answer
+  without a `score` falls back to its `confidence`. Both forms are sent by
+  the OpenRouter Decisions API; before, such answers reached the thresholds
+  with no probability at all. A probability is still only a number in [0, 1].
+
+- **Decision-model settings in the WebUI.** The tier-routing card (the plugin's
+  bundle page and the `tier-routing` component row) now has a "Decision model"
+  section: the model id, the base URL, the endpoint path, the API key (masked,
+  revealed on demand), the enabled stages (`guard`, `escalate`, `worker`,
+  `consult`) as checkboxes, the approve/block thresholds, the request timeout
+  and the per-turn call budget. Thresholds and numbers are validated in the
+  form, the stage list is filtered to the known stages, and the prompt profile
+  is editable too — every user-facing volatile field of the host entry is now
+  reachable without editing the config. The API key is masked, can be revealed
+  or cleared explicitly, and a host that masks the stored key is reported
+  instead of being shown as a real key. An unknown stage name is reported as
+  invalid instead of being dropped, the thresholds and the timeout/budget are
+  validated against the same bounds the plugin clamps to, and the form warns
+  when stages are selected without a model, when the approve threshold sits
+  below the block threshold, or when the endpoint is not https. A key that the
+  host masks never enters the staged text, so it cannot be written back over
+  the real key. The section sits between the role routes and the subagent
+  policies; the prompt profile moved to the end of the form.
+
 ## [0.10.1] - 2026-11-02
 
 ### Changed

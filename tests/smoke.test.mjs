@@ -152,6 +152,12 @@ function makeContext(options = {}) {
         this.calls.push(['writeText', target.displayPath])
         this.files.set(target.displayPath, text)
       },
+      async stat(target) {
+        this.calls.push(['stat', target.displayPath])
+        const v = this.files.get(target.displayPath)
+        if (v === undefined) throw new Error('FS_NOT_FOUND')
+        return { size: String(v).length }
+      },
     } : undefined,
   }
   ctx.services = services
@@ -175,6 +181,24 @@ test('apply() registers every surface and mounts the agent/request seam', () => 
   for (const event of ['agent/request', 'agent/inbox/inserted', 'session/event', 'agent/error', 'agent/request-error', 'tools/pre-execute']) {
     assert.ok(ctx.listeners[event] && ctx.listeners[event].length >= 1, 'listener registered for ' + event)
   }
+})
+
+test('minimal pi prompt mode declares only tier_worker', () => {
+  const { ctx, services } = makeContext()
+  apply(ctx, { plane: 'agent', promptMode: 'pi' })
+  const names = services.tools.registered.map((t) => t.name).sort()
+  assert.deepEqual(names, ['tier_worker'])
+})
+
+test('standard prompt mode still declares all eight tier_* tools', () => {
+  const { ctx, services } = makeContext()
+  apply(ctx, { plane: 'agent', promptMode: 'standard' })
+  const names = services.tools.registered.map((t) => t.name).sort()
+  assert.equal(names.length, 8)
+  assert.ok(names.includes('tier_route'))
+  assert.ok(names.includes('tier_advisor'))
+  assert.ok(names.includes('tier_sidekick'))
+  assert.ok(names.includes('tier_worker'))
 })
 
 test('host plane mounts nothing but stays silent-healthy', () => {
@@ -1271,6 +1295,89 @@ test('/tier sidekick set and cache status/clear/search', async () => {
   assert.equal(r.kind, 'success')
 })
 
+// ---- per-project TurboQuant cache + tier_worker memory ---------------------
+
+test('the TurboQuant cache is per project: two workspaces do not share entries', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: ['Touched files:', '- src/only-in-a.ts', 'Diff summary: changed the a module', 'Checks: npm test: pass'].join('\n'),
+  })
+  applyAgent(ctx)
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const inbox = ctx.listeners['agent/inbox/inserted'][0]
+
+  const a = makeAgent('a')
+  a.session.header.cwd = 'D:/proj/a'
+  await inbox({ agent: a, message: { source: { kind: 'user' }, content: 'work in project a' } })
+  await worker.execute({ task: 'change src/only-in-a.ts' }, { agent: a, signal: undefined })
+
+  const b = makeAgent('b')
+  b.session.header.cwd = 'D:/proj/b'
+  await inbox({ agent: b, message: { source: { kind: 'user' }, content: 'work in project b' } })
+  const inB = await cmd.handler({ rawInput: 'cache status', agent: b, signal: undefined })
+  assert.equal(inB.kind, 'success', inB.text)
+  assert.ok(inB.text.includes('project=D:/proj/b'), inB.text)
+  assert.ok(inB.text.includes('snippets=0'), 'the other project sees no snippet: ' + inB.text)
+  assert.ok(inB.text.includes('digests=0'), 'the other project sees no digest: ' + inB.text)
+
+  // Back to project a: its own cache still holds the recorded entry.
+  await inbox({ agent: a, message: { source: { kind: 'user' }, content: 'more work in project a' } })
+  const inA = await cmd.handler({ rawInput: 'cache status', agent: a, signal: undefined })
+  assert.ok(inA.text.includes('project=D:/proj/a'), inA.text)
+  assert.ok(inA.text.includes('snippets=1'), inA.text)
+})
+
+test('tier_worker injects the cached snippets into the next worker prompt', async () => {
+  const { ctx, services } = makeContext({
+    workerResults: [
+      ['Touched files:', '- src/parser.ts', 'Diff summary: added request body validation to parseRequest', 'Checks: npm test: pass'].join('\n'),
+      'worker-ok',
+    ],
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  await worker.execute({ task: 'extend the parseRequest body validation' }, { agent: main, signal: undefined })
+  assert.equal(services.subagents.started.length, 2)
+  const prompt = services.subagents.started[1].request.prompt[0].text
+  assert.ok(prompt.includes('Known cached snippets'), prompt)
+  assert.ok(prompt.includes('- src/parser.ts'), 'the cached snippet is injected: ' + prompt)
+})
+
+test('a foreground tier_worker records its outcome as a worker snippet and digest', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: ['Touched files:', '- lib/x.js', 'Diff summary: rewrote the helper', 'Checks: npm test: pass'].join('\n'),
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'rewrite the helper in lib/x.js' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(st.kind, 'success', st.text)
+  assert.ok(st.text.includes('snippets=1'), st.text)
+  assert.ok(st.text.includes('digests=1'), st.text)
+  assert.ok(st.text.includes('worker 1'), 'the digest card carries the worker stage: ' + st.text)
+})
+
+test('the implement sidekick sees the worker experience, the explore stage does not', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: ['Touched files:', '- src/parser.ts', 'Diff summary: added request body validation to parseRequest', 'Checks: npm test: pass'].join('\n'),
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await worker.execute({ task: 'add parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  await sk.execute({ stage: 'implement', task: 'extend the parseRequest body validation' }, { agent: main, signal: undefined })
+  const implementPrompt = services.subagents.started.at(-1).request.prompt[0].text
+  assert.ok(implementPrompt.includes('• [worker/src/parser.ts]'), implementPrompt)
+  await sk.execute({ stage: 'explore', task: 'extend the parseRequest body validation' }, { agent: main, signal: undefined })
+  const explorePrompt = services.subagents.started.at(-1).request.prompt[0].text
+  assert.ok(!explorePrompt.includes('• [worker/src/parser.ts]'), 'explore sees only its own cards: ' + explorePrompt)
+})
+
 // ---- reviewer follow-ups: enforcement points & edge cases -------------------
 
 test('smart mode blocks main edits but allows child (sidekick) delegation', async () => {
@@ -1321,6 +1428,39 @@ test('persisted settings without new v0.8.0 fields keep their defaults', async (
   const out = await status.execute({}, { agent: main, signal: undefined })
   assert.ok(out.status.includes('advisor budget: max=2/turn'), out.status)
   assert.ok(out.status.includes('forceTierOnExplicitModel=off'), out.status)
+})
+
+test('the decision catalog settings are read and reported', async () => {
+  const { ctx, services } = makeContext()
+  withDecisionSettings(ctx, { ...DECISION_CFG, decisionCatalogPath: '/v2/models', decisionCatalogQuery: 'all=1' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('catalog: https://openrouter.ai/v2/models?all=1'), out.status)
+})
+
+test('a profile without the catalog settings keeps the defaults', async () => {
+  const { ctx, services } = makeContext()
+  const inner = services.settings.describe
+  services.settings.describe = () => inner().map((d) => ({ ns: d.ns, value: { ...d.value, decisionModel: 'typesafe/jev-1.13' } }))
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('catalog: https://openrouter.ai/api/v1/models?output_modalities=decisions&limit=100'), out.status)
+})
+
+test('the decision catalog settings survive a write', async () => {
+  const { ctx, services } = makeContext()
+  withDecisionSettings(ctx, { ...DECISION_CFG, decisionCatalogPath: '/v2/models' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
+  await configure.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+  const patch = services.settings.updates[0].patch
+  assert.equal(patch.decisionCatalogPath, '/v2/models')
+  assert.equal(patch.decisionCatalogQuery, 'output_modalities=decisions&limit=100')
 })
 
 test('config fields with wrong types fall back to defaults', async () => {
@@ -1384,6 +1524,8 @@ const DECISION_CFG = {
   decisionBaseUrl: 'https://openrouter.ai',
   decisionPath: '/api/alpha/decisions',
   decisionApiKey: 'sk-test',
+  decisionCatalogPath: '/api/v1/models',
+  decisionCatalogQuery: 'output_modalities=decisions&limit=100',
   decisionStages: ['guard', 'escalate', 'worker', 'consult'],
   decisionApproveAt: 0.9,
   decisionBlockAt: 0.1,
@@ -1709,4 +1851,132 @@ test('smart mode in the three-tier layout pins main to its explicit config', asy
   assert.equal(r2.kind, 'success', r2.text)
   req = await runRequest(ctx, main)
   assert.equal(req.model, 'deepseek-v4-flash', 'main pinned to its explicit config')
+})
+
+test('/tier status hides the smart line when a session override leaves smart mode', async () => {
+  const { ctx, services } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  let out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('smart: main agent pinned to'), out.status)
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'auto' }, { agent: main, signal: undefined })
+  out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(!out.status.includes('smart: main agent pinned to'), out.status)
+})
+
+test('/tier plan keeps smart mode instead of rewriting it to auto', async () => {
+  const { ctx, services } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const out = await cmd.handler({ agent: main, rawInput: 'plan', signal: undefined })
+  assert.equal(out.kind, 'success')
+  assert.ok(out.text.includes('Routing mode: smart'), out.text)
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const s = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(s.status.includes('this session=smart'), s.status)
+  assert.ok(s.status.includes('smart: main agent pinned to'), s.status)
+  const req = await runRequest(ctx, main)
+  assert.equal(req.model, 'deepseek-v4-pro', 'plan requests stay on the plan tier')
+})
+
+test('/tier plan switches an off session to auto so the plan reaches the plan tier', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'off' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const out = await cmd.handler({ agent: main, rawInput: 'plan', signal: undefined })
+  assert.equal(out.kind, 'success')
+  assert.ok(out.text.includes('Routing mode: auto'), out.text)
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const s = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(s.status.includes('this session=auto'), s.status)
+})
+
+// ---- cache maintenance commands --------------------------------------------
+
+const WORKER_REPORT = ['Touched files:', '- src/parser.ts', 'Diff summary: added request body validation to parseRequest', 'Checks: npm test: pass'].join('\n')
+
+test('/tier cache invalidate drops the entries of one path', async () => {
+  const { ctx, services } = makeContext({ workerResult: WORKER_REPORT })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const usage = await cmd.handler({ rawInput: 'cache invalidate', agent: main, signal: undefined })
+  assert.equal(usage.kind, 'error')
+  assert.ok(usage.text.includes('usage: /tier cache invalidate <path>'), usage.text)
+  const r = await cmd.handler({ rawInput: 'cache invalidate src/parser.ts', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(r.text.includes('Invalidated 1 cache entries under src/parser.ts.'), r.text)
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.ok(st.text.includes('snippets=0'), st.text)
+})
+
+test('/tier cache export writes the export file and reports the entry count', async () => {
+  const { ctx, services } = makeContext({ fs: { files: [] }, workerResult: WORKER_REPORT })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'cache export', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(/Exported \d+ entries/.test(r.text), r.text)
+  assert.ok(r.text.includes('.dsh-turbovec-cache.export.json'), r.text)
+  const written = services.fs.files.get('.dsh-turbovec-cache.export.json')
+  assert.ok(typeof written === 'string', 'the export file was written through the fs seam')
+  const doc = JSON.parse(written)
+  assert.equal(doc.version, 2)
+  assert.ok(Array.isArray(doc.entries))
+  assert.equal(doc.entries.length, 2, 'the snippet and the digest card are exported')
+})
+
+test('/tier cache export --inline prints a short memory summary', async () => {
+  const { ctx, services } = makeContext({ workerResult: WORKER_REPORT })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'cache export --inline', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(r.text.includes('Cached memory (max 20):'), r.text)
+  const bullets = r.text.split('\n').filter((l) => l.startsWith('•'))
+  assert.ok(bullets.length > 0, r.text)
+  assert.ok(bullets.length <= 20, 'at most 20 entries are printed: ' + bullets.length)
+  assert.ok(r.text.includes('worker'), r.text)
+  const staged = await cmd.handler({ rawInput: 'cache export worker', agent: main, signal: undefined })
+  assert.equal(staged.kind, 'success', staged.text)
+  assert.ok(staged.text.includes('[worker/src/parser.ts]'), staged.text)
+})
+
+test('/tier cache gc removes the entries whose file is gone', async () => {
+  const { ctx, services } = makeContext({ fs: { files: [] }, workerResult: WORKER_REPORT })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'cache gc', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(r.text.includes('Removed 1 stale entries'), r.text)
+  assert.ok(r.text.includes('1 files checked'), r.text)
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.ok(st.text.includes('snippets=0'), st.text)
+})
+
+test('/tier cache gc reports the missing stat seam', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'cache gc', agent: main, signal: undefined })
+  assert.equal(r.kind, 'error')
+  assert.ok(r.text.includes('gc unavailable'), r.text)
 })
