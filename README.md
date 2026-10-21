@@ -142,6 +142,28 @@ sequenceDiagram
 - **Escalation rules injected into the system prompt**: ambiguity unresolved,
   architecture / security / data integrity, two failed attempts, high-risk completion —
   the model is guided to call `tier_advisor` / `tier_review` at decision points.
+- **Smart mode (`/tier smart`)**: the Main Agent plans and reviews on the plan tier
+  (`main` in the three-tier layout, `strong` otherwise) and never edits files directly —
+  `write`/`edit`/`multi_edit`/`patch` are denied by the guard. Work is delegated to
+  `tier_sidekick` in three stages: `explore` (compact file snippets), `implement`
+  (code/tests/lint), `fix` (bug fixes). Each stage runs on its own model
+  (`/tier set sidekick-<stage> <provider> <model> [effort]`), cheap tier by default.
+- **Advisor per-turn budget**: `tier_advisor` allows `advisorMaxCallsPerTurn` calls
+  (default 2) per user turn without asking; the next call asks through the approval seam
+  (30s timeout) and fails closed without approval. The budget resets on each new user
+  message. `forceTierOnExplicitModel` (default off) routes explicit-model subagent
+  children by tier rules instead of keeping their seed.
+- **TurboQuant 4-bit snippet cache**: local code embeddings (d=512, Signed Feature
+  Hashing + FWHT) stored as 4-bit vectors (256 bytes each) in a persistent
+  `.dsh-turbovec-cache.json` (via `ctx.fs`, in-memory fallback). `tier_sidekick`
+  searches it for snippets and injects them into the prompt. `/tier cache
+  status|clear|search <query>`.
+- **Digest cards + stable prefixes (v0.8.1)**: each completed sidekick stage writes a
+  memory card (diffSummary/checks/issues, capped 8 per stage) that later calls of the
+  same stage inject as `Previous outcomes (memory):`. Prompt assembly uses a fixed
+  per-stage preamble, so repeated calls share a byte-identical prefix for provider-side
+  prompt-cache reuse. Snippet search scopes to `paths[]` (`k` raised to 8) and matches
+  at a relaxed threshold.
 
 ## Installation
 
@@ -183,7 +205,8 @@ host entry and the `tiered` preset on the next startup.
    - both tiers with their provider/model/effort,
    - a `diag:` line with live counters.
 4. The `tier_status`, `tier_route`, `tier_configure`, `tier_advisor`,
-   `tier_review`, and `tier_worker` tools must be callable in that session.
+   `tier_review`, `tier_worker`, and `tier_sidekick` tools must be callable in
+   that session.
 5. While executing on the cheap tier, a high-impact command (e.g. `rm -rf`,
    `sudo …`) must be denied by the guard with an escalation hint.
 6. `/tier set strong <provider> <model> [effort]` must reply
@@ -203,6 +226,8 @@ If `/tier status` is unavailable, the row is missing from the session's preset
 /tier strong | cheap                        # force one tier for this session (optionally persist as session default)
 /tier auto                                  # restore auto for this session (plan -> strong, execution -> cheap)
 /tier delegated                             # keep the main session on the model picker; tier only subagents
+/tier smart                                 # pin the main agent to the plan tier; file edits go through tier_sidekick
+/tier cache <status|clear|search <query>>   # inspect/clear the TurboQuant snippet cache or query it
 /tier off                                   # disable routing for this session, restore its default model (other sessions unaffected)
 /tier plan                                  # auto + enter plan mode, apply the strong header immediately
 /tier models                                # list registered providers and their models
@@ -211,9 +236,13 @@ If `/tier status` is unavailable, the row is missing from the session's preset
 /tier roles <on|off>                        # advisor and reviewer on their own models, or on the strong route
 /tier gate explore <n>                      # read/search calls required before exit_plan_mode (0 disables)
 /tier gate advisor <on|off>                 # advisor reviews each plan once before you see it
+/tier gate advisor-limit <n> [timeoutSec]   # free tier_advisor calls per user turn; the next one asks for confirmation
 /tier set <strong|main|cheap|advisor|reviewer> <provider> <model> [effort]
 /tier set <strong|main> follow-session      # follow the session model selection
+/tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
+                                            # per-stage sidekick model for smart mode (blank = cheap tier)
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # subagent route; caller is for fork only, capped never goes above main
+/tier subagent force-explicit <on|off>      # route explicit-model subagent children by tier rules (default off)
 /tier review <focus>                        # strong-tier review
 ```
 
@@ -236,8 +265,9 @@ Tiered model routing
 | --- | --- |
 | `tier_advisor` | Strong-tier consultation: one question + evidence -> advice / risks / acceptance criteria |
 | `tier_review` | Strong-tier review: change set + validation results -> verdict with ranked issues |
-| `tier_route` | Set **this session's** tier (strong/cheap/auto/delegated/off, optionally persisted) |
+| `tier_route` | Set **this session's** tier (strong/cheap/auto/delegated/smart/off, optionally persisted) |
 | `tier_configure` | Reconfigure a tier (strong/main/cheap) or a role (advisor/reviewer) provider/model/effort, and the subagent policy |
+| `tier_sidekick` | Smart-mode delegation: spawn a staged subagent (`explore`/`implement`/`fix`) on the stage model with TurboQuant cache injection |
 | `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / agentPreset / maxDepth / background |
 | `tier_status` | Read-only diagnostics: global & session tiers, escalation state, listener counters, effective tier |
 

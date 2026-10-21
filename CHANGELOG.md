@@ -2,6 +2,77 @@
 
 All notable changes to dsh-tier-router are documented here.
 
+## [0.8.1] - 2026-10-21
+
+### Added
+
+- **Digest cards (sidekick memory).** `upsertDigest` in the TurboQuant index
+  stores the compact outcome of a completed sidekick stage per area
+  (diffSummary + checks + issues), capped per stage (8, oldest evicted) and
+  never removed by file invalidation (a card describes a result, not a file).
+  `tier_sidekick` queries cards for its own stage and injects the top 3 into
+  the prompt as `Previous outcomes (memory):` — the sidekick now "remembers"
+  its prior work between calls without any session reuse.
+- **Byte-stable prompt prefixes.** Each stage has a fixed preamble; the prompt
+  assembles as preamble → task → cards → snippets. Repeated calls within a
+  stage share an identical prefix (tested byte-for-byte), improving provider
+ -side prompt-cache hits even on fresh sessions.
+- **Search scoping.** `search` gained `kindFilter` (`snippet`/`digest`),
+  `stageFilter`, and array `pathFilter`; results sort deterministically
+  (score desc, then path+lines). `tier_sidekick` raises snippet `k` to 8 and
+  scopes `pathFilter` to the given `paths[]`; snippet matching threshold
+  relaxed to 0.12 so varying task phrasing still recalls relevant snippets.
+- **Cache format v2** (version field, per-entry `kind`); v1 import and still
+  supported and treated as snippets. `stats()` reports `snippets`/`digests`;
+  `/tier cache status` and `/tier status` show both plus `digestHits`.
+
+## [0.8.0] - 2026-10-21
+
+### Added
+
+- **Smart mode (`/tier smart`, `tier_route tier: "smart"`).** The Main Agent is
+  pinned to the planning/architecture tier (`main` in the three-tier layout,
+  `strong` otherwise) regardless of plan state, keeping its provider-side KV
+  cache continuous. In smart mode the Main Agent cannot call `write`, `edit`,
+  `multi_edit`, or `patch` directly — the pre-execute guard denies them with a
+  pointer to `tier_sidekick`. File exploration and mutation are delegated to
+  sidekick subagents spawned per stage on the stage model.
+- **`tier_sidekick` tool.** Stages `explore` (returns compact `File snippets`),
+  `implement` (writes code/tests/lint fixes), and `fix` (fixes bugs). Each stage
+  runs on its configured model (`/tier set sidekick-<stage> <provider> <model>
+  [effort]` or `reset`); the base route is the cheap tier. The sidekick is
+  spawned with `startWorker` and its seed route is preserved verbatim through the
+  new `childRouteSource` `keepSeed` branch. Explore results are indexed into the
+  TurboQuant cache; implement/fix results invalidate touched files and index the
+  change summary.
+- **TurboQuant 4-bit snippet cache.** `lib/core/turbovec.js` embeds code text
+  locally (Signed Feature Hashing, d=512, L2-normalized), rotates it with a
+  deterministic FWHT, and stores 4-bit Lloyd–Max vectors (256 bytes per vector).
+  `lib/dsh/vec-cache.js` persists the cache with a 1s debounce to
+  `.dsh-turbovec-cache.json` via `ctx.fs` (in-memory only without a writable fs
+  service). `/tier cache status|clear|search <query>`; `paths[]` evidence for
+  `tier_advisor`/`tier_review` is read with caps and combined with top cached
+  snippets.
+- **Advisor per-turn budget.** `advisorMaxCallsPerTurn` (default 2) and
+  `advisorConfirmTimeoutSec` (default 30) config fields. `tier_advisor` allows
+  that many calls per user turn without asking; the next call asks through the
+  approval seam (`ctx.approval.request`, outcomes `allowed-once` → proceed,
+  anything else fails closed) with a 30s timeout, and denies when no approval is
+  available. The budget resets on each user message.
+- **`forceTierOnExplicitModel` (default off).** When on, subagent children with
+  an explicit seed model are routed by tier/policy rules instead of keeping the
+  seed (`childRouteSource` `forceTier` branch). Toggle with `/tier subagent
+  force-explicit <on|off>` or the WebUI field.
+- **Softer consultation parsing.** `softParseSections` extracts `risks`,
+  `nextSteps`, `acceptanceChecks` (advisor) and `issues` (review) from JSON or
+  Markdown section lists; `advice`/`review`/`verdict` stay fully backward
+  compatible and the tool outputs expose the structured fields.
+
+### Fixed
+
+- `base64ToBytes` decoded unpadded input by dropping padding, which corrupted
+  cache entries on import; it now pads its input before decoding.
+
 ## [0.7.1] - 2026-10-21
 
 ### Fixed

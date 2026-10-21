@@ -59,7 +59,8 @@ function makeContext(options = {}) {
         const efforts = provider === 'cctq' ? ['low', 'medium', 'high'] : ['off', 'high', 'max']
         return { provider, id: model, name: model, reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } }
       },
-      stream: async function* () {
+      stream: async function* (options) {
+        services.llm.lastStreamOptions = options
         yield { type: 'text-delta', text: 'MOCK ADVICE' }
         yield { type: 'finish', reason: { kind: 'stop' } }
       },
@@ -82,7 +83,12 @@ function makeContext(options = {}) {
         this.started.push(spec)
         return {
           childId: localAgent.session.id,
-          result: Promise.resolve({ output: [{ type: 'text', text: 'worker-ok' }], stopReason: 'stop' }),
+          result: Promise.resolve({
+            output: [{ type: 'text', text: Array.isArray(options.workerResults) && options.workerResults.length
+              ? options.workerResults.shift()
+              : (options.workerResult ?? 'worker-ok') }],
+            stopReason: 'stop',
+          }),
           dispose: async () => {},
         }
       },
@@ -125,6 +131,30 @@ function makeContext(options = {}) {
         return 'subagent-1'
       },
     },
+    approval: {
+      requests: [],
+      outcome: options.approvalOutcome ?? 'allowed-once',
+      async request(req) { this.requests.push(req); return this.outcome },
+    },
+    fs: options.fs ? {
+      files: new Map((options.fs.files || []).map(([p, v]) => [p, v])),
+      calls: [],
+      async resolve(p, opts) {
+        this.calls.push(['resolve', p])
+        return { key: String((opts && opts.cwd) || '') + '/' + p, displayPath: p }
+      },
+      async readText(target) {
+        this.calls.push(['readText', target.displayPath])
+        const v = this.files.get(target.displayPath)
+        if (v === undefined) throw new Error('FS_NOT_FOUND')
+        if (typeof v !== 'string') throw new Error('FS_NOT_TEXT')
+        return v
+      },
+      async writeText(target, text) {
+        this.calls.push(['writeText', target.displayPath])
+        this.files.set(target.displayPath, text)
+      },
+    } : undefined,
   }
   ctx.services = services
   return { ctx, services, childAgents }
@@ -138,7 +168,7 @@ test('apply() registers every surface and mounts the agent/request seam', () => 
   const { ctx, services } = makeContext()
   applyAgent(ctx)
   const names = services.tools.registered.map((t) => t.name).sort()
-  assert.deepEqual(names, ['tier_advisor', 'tier_configure', 'tier_escalate_effort', 'tier_review', 'tier_route', 'tier_status', 'tier_worker'])
+  assert.deepEqual(names, ['tier_advisor', 'tier_configure', 'tier_escalate_effort', 'tier_review', 'tier_route', 'tier_sidekick', 'tier_status', 'tier_worker'])
   assert.deepEqual(services.commands.registered.map((c) => c.name).sort(), ['advisor', 'tier'])
   assert.equal(services.systemPrompt.sections.length, 1)
   assert.equal(services.systemPrompt.sections[0].name, 'tier-routing')
@@ -1031,4 +1061,315 @@ test('abort-class failures do not advance the escalation counter', async () => {
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   const out = await status.execute({}, { agent: main, signal: undefined })
   assert.ok(!out.status.includes('ESCALATED'), out.status)
+})
+
+// ---- smart mode & Tierkick --------------------------------------------------
+
+test('smart mode pins the main agent to the plan tier and blocks direct file edits', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  const r = await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  assert.equal(r.applied, 'smart')
+  const req = await runRequest(ctx, main, { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  // two-tier layout: plan tier = strong = deepseek-v4-pro@max
+  assert.equal(req.model, 'deepseek-v4-pro')
+  assert.equal(req.provider, 'deepseek-official')
+
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  for (const name of ['write', 'edit', 'multi_edit', 'patch']) {
+    const denied = await guard({ agent: main, name, arguments: {} }, async () => ({}))
+    assert.equal(denied.kind, 'deny', name + ' denied for smart main')
+    assert.ok(denied.reason.includes('tier_sidekick'), name + ' reason mentions sidekick')
+  }
+  const allowed = await guard({ agent: main, name: 'read', arguments: {} }, async () => ({}))
+  assert.ok(allowed === undefined || allowed.kind !== 'deny', 'read passes for smart main')
+})
+
+test('tier_sidekick spawns a child on the stage route and caches explored snippets', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | parses the request body',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  assert.ok(sk, 'tier_sidekick tool registered')
+  const out = await sk.execute({ stage: 'explore', task: 'find the parser', paths: ['src'] }, { agent: main, signal: undefined })
+  assert.equal(out.stage, 'explore')
+  assert.equal(out.ok, true)
+  assert.equal(out.snippets.length, 1)
+  assert.equal(out.snippets[0].path, 'src/parser.ts')
+  const spawn = services.subagents.started.at(-1)
+  assert.equal(spawn.label, 'sidekick:explore')
+  assert.equal(spawn.request.agentOptions.provider, 'cctq')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const found = await cmd.handler({ rawInput: 'cache search parseRequest', agent: main, signal: undefined })
+  assert.equal(found.kind, 'success', found.text)
+  assert.ok(found.text.includes('src/parser.ts'), found.text)
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const st = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(st.status.includes('turbovec cache: snippets=1'), st.status)
+})
+
+test('tier_sidekick implement invalidates and re-indexes touched files', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'implement', task: 'write the parser' }, { agent: main, signal: undefined })
+  assert.equal(out.stage, 'implement')
+  assert.equal(out.ok, true)
+  assert.equal(out.touchedFiles.length, 0) // mock returns generic worker output, no parsed files
+})
+
+// ---- advisor budget ---------------------------------------------------------
+
+test('advisor budget: two free calls, the third asks and fails closed without approval', async () => {
+  const { ctx, services } = makeContext({ approvalOutcome: 'cancelled' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  const execCtx = { agent: main, signal: undefined }
+  const one = await advisor.execute({ question: 'q1' }, execCtx)
+  const two = await advisor.execute({ question: 'q2' }, execCtx)
+  assert.equal(one.ok, true)
+  assert.equal(two.ok, true)
+  const three = await advisor.execute({ question: 'q3' }, execCtx)
+  assert.equal(three.ok, false)
+  assert.ok(three.advice.includes('per-turn limit'), three.advice)
+  assert.equal(services.approval.requests.length, 1)
+  assert.ok(services.approval.requests[0].reason.includes('Allow another call'))
+})
+
+test('advisor budget: user approval lets the third call through', async () => {
+  const { ctx, services } = makeContext({ approvalOutcome: 'allowed-once' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  await advisor.execute({ question: 'q1' }, { agent: main, signal: undefined })
+  await advisor.execute({ question: 'q2' }, { agent: main, signal: undefined })
+  const three = await advisor.execute({ question: 'q3' }, { agent: main, signal: undefined })
+  assert.equal(three.ok, true)
+  assert.equal(services.approval.requests.length, 1)
+})
+
+test('advisor budget resets on a new user message', async () => {
+  const { ctx, services } = makeContext({ approvalOutcome: 'cancelled' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  await advisor.execute({ question: 'q1' }, { agent: main, signal: undefined })
+  await advisor.execute({ question: 'q2' }, { agent: main, signal: undefined })
+  const inbox = ctx.listeners['agent/inbox/inserted'][0]
+  await inbox({ agent: main, message: { source: { kind: 'user' }, content: 'hi' } })
+  const again = await advisor.execute({ question: 'q3' }, { agent: main, signal: undefined })
+  assert.equal(again.ok, true)
+})
+
+// ---- forceTierOnExplicitModel ------------------------------------------------
+
+test('forceTierOnExplicitModel routes explicit-model children by tier policy', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const on = await cmd.handler({ rawInput: 'subagent force-explicit on', agent: main, signal: undefined })
+  assert.equal(on.kind, 'success', on.text)
+  const child = makeAgent('child', 'subagent')
+  const req = await runRequest(ctx, child, { provider: 'opencode-go', model: 'custom-model', reasoningEffort: 'high' })
+  assert.equal(req.provider, 'cctq')
+})
+
+// ---- paths[] evidence + /tier cache -----------------------------------------
+
+test('tier_advisor attaches paths content as evidence', async () => {
+  const { ctx, services } = makeContext({
+    fs: { files: [['src/a.ts', 'export function parseRequest(req) {}']] },
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  const out = await advisor.execute({ question: 'design?', paths: ['src/a.ts'] }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  const opts = services.llm.lastStreamOptions
+  const text = opts.messages[0].content[0].text
+  assert.ok(text.includes('File src/a.ts'), text)
+  assert.ok(text.includes('parseRequest'), text)
+})
+
+test('tier_sidekick remembers prior outcomes via digest cards', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: [
+      'Touched files:',
+      '- src/parser.ts',
+      'Diff summary: added body validation.',
+      'Checks: npm test: pass',
+    ].join('\n'),
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const first = await sk.execute({ stage: 'implement', task: 'write parser validation' }, { agent: main, signal: undefined })
+  assert.equal(first.ok, true)
+  assert.deepEqual(first.touchedFiles, ['src/parser.ts'])
+  const second = await sk.execute({ stage: 'implement', task: 'parser validation update' }, { agent: main, signal: undefined })
+  assert.equal(second.ok, true)
+  const promptText = services.subagents.started.at(-1).request.prompt[0].text
+  assert.ok(promptText.includes('Previous outcomes (memory):'), promptText)
+  assert.ok(promptText.includes('• [implement/src/parser.ts]'), promptText)
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(st.kind, 'success', st.text)
+  assert.ok(st.text.includes('digests=1'), st.text)
+  assert.ok(st.text.includes('digestHits=1'), st.text)
+})
+
+test('sidekick prompts share a byte-stable prefix within a stage', async () => {
+  const { ctx, services } = makeContext({
+    workerResults: [
+      'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | ok',
+      'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | ok',
+    ],
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'explore', task: 'find parser' }, { agent: main, signal: undefined })
+  await sk.execute({ stage: 'explore', task: 'find renderer' }, { agent: main, signal: undefined })
+  const p1 = services.subagents.started[0].request.prompt[0].text
+  const p2 = services.subagents.started[1].request.prompt[0].text
+  const cut = 'Task: '
+  const i1 = p1.indexOf(cut)
+  const i2 = p2.indexOf(cut)
+  assert.ok(i1 > 0 && i2 > 0)
+  assert.equal(p1.slice(0, i1), p2.slice(0, i2), 'stable stage prefix')
+})
+
+test('paths[] scopes snippet search in the sidekick prompt', async () => {
+  const { ctx, services } = makeContext({
+    workerResults: [
+      'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | parses request body',
+      'Snippet: lib/routing.js | 10-20 | export function resolveRoute(agent, seed) { return null } | routes a request',
+    ],
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'explore', task: 'find parser' }, { agent: main, signal: undefined })
+  await sk.execute({ stage: 'explore', task: 'find routing' }, { agent: main, signal: undefined })
+  await sk.execute({ stage: 'explore', task: 'find parser code', paths: ['src'] }, { agent: main, signal: undefined })
+  const promptText = services.subagents.started.at(-1).request.prompt[0].text
+  assert.ok(promptText.includes('src/parser.ts'), promptText)
+  assert.ok(!promptText.includes('lib/routing.js'), promptText)
+})
+
+test('/tier sidekick set and cache status/clear/search', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  let r = await cmd.handler({ rawInput: 'set sidekick-explore opencode-go gpt-5.6-terra high', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  r = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success')
+  assert.ok(r.text.includes('TurboQuant cache'), r.text)
+  r = await cmd.handler({ rawInput: 'cache clear', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success')
+  r = await cmd.handler({ rawInput: 'cache search parseRequest', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success')
+})
+
+// ---- reviewer follow-ups: enforcement points & edge cases -------------------
+
+test('smart mode blocks main edits but allows child (sidekick) delegation', async () => {
+  const { ctx } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const child = makeAgent('child', 'subagent')
+  const route = ctx.services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const denied = await guard({ agent: main, name: 'write', arguments: {} }, async () => ({}))
+  assert.equal(denied.kind, 'deny')
+  const allowed = await guard({ agent: child, name: 'write', arguments: {} }, async () => ({}))
+  assert.ok(allowed === undefined || allowed.kind !== 'deny', 'children may write (delegation path)')
+})
+
+test('smart mode + forceTierOnExplicitModel routes explicit children by tier', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  await cmd.handler({ rawInput: 'subagent force-explicit on', agent: main, signal: undefined })
+  const child = makeAgent('child', 'subagent')
+  const req = await runRequest(ctx, child, { provider: 'opencode-go', model: 'custom-model', reasoningEffort: 'high' })
+  assert.equal(req.provider, 'cctq')
+})
+
+test('advisor budget is not reset by empty or text-less messages', async () => {
+  const { ctx, services } = makeContext({ approvalOutcome: 'cancelled' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  await advisor.execute({ question: 'q1' }, { agent: main, signal: undefined })
+  await advisor.execute({ question: 'q2' }, { agent: main, signal: undefined })
+  const inbox = ctx.listeners['agent/inbox/inserted'][0]
+  await inbox({ agent: main, message: { source: { kind: 'user' }, content: [] } })
+  const three = await advisor.execute({ question: 'q3' }, { agent: main, signal: undefined })
+  assert.equal(three.ok, false, 'budget stays exhausted after empty message')
+})
+
+test('persisted settings without new v0.8.0 fields keep their defaults', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('advisor budget: max=2/turn'), out.status)
+  assert.ok(out.status.includes('forceTierOnExplicitModel=off'), out.status)
+})
+
+test('config fields with wrong types fall back to defaults', async () => {
+  const { ctx, services } = makeContext()
+  const inner = services.settings.describe
+  services.settings.describe = () => inner().map((d) => ({
+    ns: d.ns,
+    value: { ...d.value, advisorMaxCallsPerTurn: 'banana', advisorConfirmTimeoutSec: null, forceTierOnExplicitModel: 'yes' },
+  }))
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const out = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(out.status.includes('advisor budget: max=2/turn'), out.status)
+  assert.ok(out.status.includes('forceTierOnExplicitModel=off'), out.status)
+})
+
+test('advisor budget is not reset by whitespace-only messages', async () => {
+  const { ctx, services } = makeContext({ approvalOutcome: 'cancelled' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.tools.registered.find((t) => t.name === 'tier_advisor')
+  await advisor.execute({ question: 'q1' }, { agent: main, signal: undefined })
+  await advisor.execute({ question: 'q2' }, { agent: main, signal: undefined })
+  const inbox = ctx.listeners['agent/inbox/inserted'][0]
+  await inbox({ agent: main, message: { source: { kind: 'user' }, content: '   ' } })
+  const three = await advisor.execute({ question: 'q3' }, { agent: main, signal: undefined })
+  assert.equal(three.ok, false, 'budget stays exhausted after whitespace-only message')
+})
+
+test('smart mode without forceTier keeps the explicit child seed', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  services.agents.register(main)
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  const child = makeAgent('child', 'subagent')
+  child.session.header.parentSession = main.session.id
+  const req = await runRequest(ctx, child, { provider: 'opencode-go', model: 'custom-model', reasoningEffort: 'high' })
+  assert.equal(req.provider, 'opencode-go')
+  assert.equal(req.model, 'custom-model')
 })

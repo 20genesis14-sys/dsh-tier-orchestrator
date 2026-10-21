@@ -260,3 +260,96 @@ change the adapter **and** the mock together.
 Live acceptance: install the bundle, open a session on the `tiered` preset,
 `/tier status` should show `routing seam: waterfall`, `seams: all ok`, and
 `config persisted: yes (host entry "tier-routing", writable)`.
+
+## 11. v0.8.0 additions: smart mode, sidekick, advisor budget, TurboQuant
+
+### Smart mode
+
+- `mode: 'smart'` is a session/global mode. `tierNameFor` short-circuits the
+  Main Agent (`!isChildAgent`) to the plan tier (`main` in three tiers, `strong`
+  otherwise) regardless of plan state; failure escalation still outranks it.
+- The `tools/pre-execute` guard denies `write`/`edit`/`multi_edit`/`patch` for
+  the Main Agent in smart mode, pointing at `tier_sidekick`.
+
+### Sidekicks
+
+- `lib/core/sidekick.js` owns the stage registry (explore/implement/fix):
+  system prompts, user-prompt builders (`buildUser`), and tolerant response
+  parsers (`parseExploreSnippets`, `parseChangeReport`).
+- `tier_sidekick` spawns a subagent via `startWorker` with `agentOptions` from
+  `resolveSidekickTarget(stage, state)` (stage override or cheap tier). The
+  child is recorded in the `childKeepSeed` WeakMap; `childRouteSource` returns
+  `'keep'` for it, so the waterfall preserves the seeded stage model verbatim.
+- Explore results are upserted into the TurboQuant cache; implement/fix results
+  invalidate touched paths and index the change summary.
+
+### Advisor budget
+
+- `decideAdvisorBudget(callsInTurn, maxCalls, confirmTimeoutSec)` in
+  `lib/core/policy.js`: `allow` below the limit, `ask` at the limit when
+  confirmation is configured, `deny` otherwise.
+- `tier_advisor.execute` counts per-agent calls in the `advisorTurnCalls`
+  WeakMap, reset on `agent/inbox/inserted` user messages. The ask path uses the
+  approval service (`ctx.get('approval')` → `ApprovalService.request`), which
+  requires an open turn (a tool execute inside a turn qualifies) and returns
+  `allowed-once | rejected | cancelled | unavailable`; only `allowed-once`
+  proceeds, everything else fails closed. The timeout is
+  `AbortSignal.any([exec.signal, AbortSignal.timeout(ms)])` — Node ≥ 20 only,
+  which the declared engines guarantee.
+
+### TurboQuant cache
+
+- `lib/core/turbovec.js` is pure: `embedCodeText` (Signed Feature Hashing over
+  paths/identifiers/trigrams/keywords/pairs, L2-normalized), `rotateVector`
+  (deterministic sign scramble + FWHT), `createTurboQuantIndex` (16 Lloyd–Max
+  levels of the standard normal, two coordinates per byte, LUT scoring, base64
+  state export/import — hand-rolled, no Node globals).
+- `lib/dsh/vec-cache.js` adapts `ctx.fs`: `resolve`/`readText`/`writeText`
+  only (the fs contract has no delete/rename; cache clear = overwrite with
+  empty state), 1s debounced saves of `.dsh-turbovec-cache.json`, and
+  `readEvidencePaths` with per-file/total caps for `paths[]` evidence.
+- Seams: `approvalRequest`, `fsResolve`, `fsReadText`, `fsWriteText` added to
+  `probeServices` (optional: absence degrades the feature, never crashes).
+- Cache safety: the cache file name is a compiled-in constant
+  (`.dsh-turbovec-cache.json`), never derived from user input, and all writes
+  go through `fs.resolve` against the captured workspace cwd, so containment is
+  the mounted backend's job (fs-local/fs-sandbox). Corruption on import is
+  handled per entry (wrong code length → entry skipped; unparsable JSON →
+  cache starts empty); `maxEntries` bounds memory with oldest-first eviction.
+  `paths[]` evidence reads are read-only and size-capped. Import validates
+  every entry (dim, code length, decodable base64) and counts skipped/corrupt
+  entries in `stats().importSkipped`, surfaced by `/tier cache status`, so a
+  stale or damaged file degrades observably instead of silently.
+- Threat model for the smart-mode write guard: enforcement is at the DSH
+  execution seam (`tools/pre-execute`), not in the prompt — the Main Agent's
+  `write`/`edit`/`multi_edit`/`patch` calls are denied at tool-execution time.
+  Child sidekicks are intentionally allowed to write: that is the delegation
+  contract (Main plans/reviews, sidekicks edit). An attacker who can fabricate
+  a child tool call already controls the harness's own subagent pipeline; the
+  plugin does not widen that surface.
+- WebUI (`client/client.js`): `'smart'` in the mode enum, three sidekick route
+  fields, `advisorMaxCallsPerTurn`, `advisorConfirmTimeoutSec`,
+  `forceTierOnExplicitModel`.
+
+### v0.8.1: digest cards, stable prompt prefixes, search scoping
+
+- **Digest cards.** `createTurboQuantIndex().upsertDigest({stage, area,
+  diffSummary, checks, issues})` stores a `kind:'digest'` entry keyed
+  internally as `digest::<stage>::<area>` (path = canonical area). Cards are
+  capped per stage (8, oldest evicted) and are skipped by
+  `invalidateByPath` — a card describes a result, not a file, so file
+  rewrites never remove them.
+- **Stable prefixes.** Each sidekick stage has a fixed `STAGE_PREAMBLES`
+  entry; `buildUser` assembles preamble → task → cards → snippets. Two calls
+  within a stage share a byte-identical prefix (regression-tested), which is
+  the necessary condition for provider-side prompt-cache reuse on fresh
+  sessions. `formatCard` renders cards deterministically (no timestamps, no
+  insertion-order numbering).
+- **Search scoping.** `search` accepts `kindFilter`, `stageFilter`, and array
+  `pathFilter`; tie-breaking is deterministic (path+lines). `tier_sidekick`
+  uses `k:8` + `pathFilter` when `paths[]` is given, `kindFilter:'snippet'`
+  at 0.12, and `kindFilter:'digest', stageFilter` at 0.12 for its memory
+  cards. `diag.digestHits` counts card hits; `/tier cache status` reports
+  snippets/digests/hits.
+- **Cache format v2** with per-entry `kind`; v1 imports still load (all
+  entries become snippets). `stats()` gains `snippets`/`digests`.

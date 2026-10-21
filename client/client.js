@@ -51,7 +51,7 @@ const en = {
   refresh: 'Refresh',
 
   mode: 'Routing mode',
-  modeHint: 'auto | strong | cheap | delegated | off. auto: plan mode uses strong, execution uses cheap. delegated: only subagents are tiered.',
+  modeHint: 'auto | strong | cheap | delegated | off | smart. auto: plan mode uses strong, execution uses cheap. delegated: only subagents are tiered. smart: the main agent plans/reviews and delegates file edits to sidekicks.',
   strongRoute: 'Strong model',
   cheapRoute: 'Cheap model',
   routeHint: 'The same catalog the session picker uses. A route the catalog does not list: choose "Route not listed".',
@@ -82,6 +82,19 @@ const en = {
   planMinExploreHint: 'Whole number. The plan is refused until the agent has read or searched the code this many times in plan mode. 0 disables the check.',
   planAdvisorGate: 'Plan: advisor review before presenting',
   planAdvisorGateHint: 'true | false. true: the advisor reviews each plan once, and its advice goes back to the agent before you see the plan.',
+  sidekickExploreRoute: 'Sidekick explore model',
+  sidekickImplementRoute: 'Sidekick implement model',
+  sidekickFixRoute: 'Sidekick fix model',
+  sidekickExploreEffort: 'Sidekick explore effort',
+  sidekickImplementEffort: 'Sidekick implement effort',
+  sidekickFixEffort: 'Sidekick fix effort',
+  sidekickHint: 'Optional per-stage model for smart-mode sidekicks. Blank = the cheap tier route.',
+  advisorMaxCallsPerTurn: 'Advisor max calls per turn',
+  advisorMaxCallsPerTurnHint: 'Whole number. The next call past this limit asks for confirmation before running.',
+  advisorConfirmTimeoutSec: 'Advisor confirm timeout (s)',
+  advisorConfirmTimeoutSecHint: 'Seconds to wait for the confirmation on the call past the limit. 0 disables asking (the extra call is denied).',
+  forceTierOnExplicitModel: 'Force tier on explicit model',
+  forceTierOnExplicitModelHint: 'true | false. true: subagent children with an explicit model are still routed by tier/policy rules instead of keeping their seed route.',
   threeTiers: 'Three-tier layout',
   threeTiersHint: 'true | false. false: strong plans, cheap executes. true: main plans, cheap executes, strong is the escalation tier.',
   mainRoute: 'Main model',
@@ -123,7 +136,7 @@ const zh = {
   refresh: '刷新',
 
   mode: '路由模式',
-  modeHint: 'auto | strong | cheap | delegated | off。auto：计划阶段走强档，执行阶段走低成本档；delegated：仅子代理分档。',
+  modeHint: 'auto | strong | cheap | delegated | off | smart。auto：计划阶段走强档，执行阶段走低成本档；delegated：仅子代理分档；smart：主代理规划/审查，文件修改交给 sidekick。',
   strongRoute: '强档模型',
   cheapRoute: '低成本档模型',
   routeHint: '与会话选择器相同的目录。目录里没有的路由请选择“未列出的路由”。',
@@ -154,6 +167,19 @@ const zh = {
   planMinExploreHint: '整数。计划模式中代理读取或搜索代码达到此次数前，计划会被拒绝。0 表示关闭检查。',
   planAdvisorGate: '计划：提交前顾问审查',
   planAdvisorGateHint: 'true | false。true：顾问对每份计划审查一次，建议先返回给代理，再由你看到计划。',
+  sidekickExploreRoute: 'Sidekick 探索模型',
+  sidekickImplementRoute: 'Sidekick 实现模型',
+  sidekickFixRoute: 'Sidekick 修复模型',
+  sidekickExploreEffort: 'Sidekick 探索推理强度',
+  sidekickImplementEffort: 'Sidekick 实现推理强度',
+  sidekickFixEffort: 'Sidekick 修复推理强度',
+  sidekickHint: 'smart 模式下各阶段的可选模型。留空使用低成本档路由。',
+  advisorMaxCallsPerTurn: '顾问每轮最大调用次数',
+  advisorMaxCallsPerTurnHint: '整数。超过该次数后，下一次调用需要确认。',
+  advisorConfirmTimeoutSec: '顾问确认超时（秒）',
+  advisorConfirmTimeoutSecHint: '等待确认的秒数。0 表示不询问并直接拒绝超限调用。',
+  forceTierOnExplicitModel: '显式模型也强制分档',
+  forceTierOnExplicitModelHint: 'true | false。true：带显式模型的子代理仍按档位/策略路由，而不是保留种子路由。',
   threeTiers: '三档布局',
   threeTiersHint: 'true | false。false：强档规划，低成本档执行。true：主档规划，低成本档执行，强档作为升级档。',
   mainRoute: '主档模型',
@@ -358,7 +384,7 @@ function chainField(field) {
 }
 
 const SPECS = [
-  enumField('mode', ['auto', 'strong', 'cheap', 'delegated', 'off']),
+  enumField('mode', ['auto', 'strong', 'cheap', 'delegated', 'off', 'smart']),
   boolField('threeTiers'),
   P.settingsTextField('strongProvider'),
   P.settingsTextField('strongModel'),
@@ -387,6 +413,18 @@ const SPECS = [
   enumField('forkPolicy', ['', 'inherit', 'strong', 'cheap', 'main', 'caller', 'capped']),
   P.settingsNumberField('planMinExplore'),
   boolField('planAdvisorGate'),
+  P.settingsTextField('sidekickExploreProvider'),
+  P.settingsTextField('sidekickExploreModel'),
+  P.settingsTextField('sidekickExploreEffort'),
+  P.settingsTextField('sidekickImplementProvider'),
+  P.settingsTextField('sidekickImplementModel'),
+  P.settingsTextField('sidekickImplementEffort'),
+  P.settingsTextField('sidekickFixProvider'),
+  P.settingsTextField('sidekickFixModel'),
+  P.settingsTextField('sidekickFixEffort'),
+  P.settingsNumberField('advisorMaxCallsPerTurn'),
+  P.settingsNumberField('advisorConfirmTimeoutSec'),
+  boolField('forceTierOnExplicitModel'),
 ]
 
 /** Locale keys of each route slot: [route label, effort label]. */
@@ -396,6 +434,9 @@ const ROUTE_LABELS = {
   cheap: ['cheapRoute', 'cheapEffort'],
   advisor: ['advisorRoute', 'advisorEffort'],
   reviewer: ['reviewerRoute', 'reviewerEffort'],
+  sidekickExplore: ['sidekickExploreRoute', 'sidekickExploreEffort'],
+  sidekickImplement: ['sidekickImplementRoute', 'sidekickImplementEffort'],
+  sidekickFix: ['sidekickFixRoute', 'sidekickFixEffort'],
 }
 
 // ---- controls --------------------------------------------------------------
@@ -571,7 +612,7 @@ function TierRoutingCard(props) {
   const t = props.t
   const state = props.useTierRoutingCard((snapshot) => snapshot)
   const catalog = props.useModelCatalog((snapshot) => snapshot)
-  const [custom, setCustom] = useState({ strong: false, main: false, cheap: false, advisor: false, reviewer: false })
+  const [custom, setCustom] = useState({ strong: false, main: false, cheap: false, advisor: false, reviewer: false, sidekickExplore: false, sidekickImplement: false, sidekickFix: false })
   const loadCatalog = props.loadCatalog
   useEffect(() => {
     if (props.view !== 'summary') loadCatalog()
@@ -605,7 +646,15 @@ function TierRoutingCard(props) {
     h(TextField, { ...common, fieldKey: 'spawnPolicy', labelKey: 'spawnPolicy', hintKey: 'spawnPolicyHint' }),
     h(TextField, { ...common, fieldKey: 'forkPolicy', labelKey: 'forkPolicy', hintKey: 'forkPolicyHint' }),
     h(TextField, { ...common, fieldKey: 'planMinExplore', labelKey: 'planMinExplore', hintKey: 'planMinExploreHint' }),
-    h(TextField, { ...common, fieldKey: 'planAdvisorGate', labelKey: 'planAdvisorGate', hintKey: 'planAdvisorGateHint' }))
+    h(TextField, { ...common, fieldKey: 'planAdvisorGate', labelKey: 'planAdvisorGate', hintKey: 'planAdvisorGateHint' }),
+    h('p', { style: { ...captionStyle, margin: '10px 0 2px', fontWeight: 600 } }, t('sidekickRoute')),
+    h('p', { style: { ...captionStyle, margin: '0 0 6px' } }, t('sidekickHint')),
+    h(RouteField, { ...common, tier: 'sidekickExplore', customOn: custom.sidekickExplore, onToggleCustom: toggleCustom('sidekickExplore') }),
+    h(RouteField, { ...common, tier: 'sidekickImplement', customOn: custom.sidekickImplement, onToggleCustom: toggleCustom('sidekickImplement') }),
+    h(RouteField, { ...common, tier: 'sidekickFix', customOn: custom.sidekickFix, onToggleCustom: toggleCustom('sidekickFix') }),
+    h(TextField, { ...common, fieldKey: 'advisorMaxCallsPerTurn', labelKey: 'advisorMaxCallsPerTurn', hintKey: 'advisorMaxCallsPerTurnHint' }),
+    h(TextField, { ...common, fieldKey: 'advisorConfirmTimeoutSec', labelKey: 'advisorConfirmTimeoutSec', hintKey: 'advisorConfirmTimeoutSecHint' }),
+    h(TextField, { ...common, fieldKey: 'forceTierOnExplicitModel', labelKey: 'forceTierOnExplicitModel', hintKey: 'forceTierOnExplicitModelHint' }))
 }
 
 /** Staged form over the `tier-routing` settings namespace. */

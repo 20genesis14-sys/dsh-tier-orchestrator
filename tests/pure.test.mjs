@@ -9,6 +9,10 @@ import { escalationStep, escalationActive, escalationExpired, decideGuardAction,
 import { consultSpec, CONSULTS, modelFamily, reviewerConflicts } from '../lib/core/consult.js'
 import { childRouteSource, cappedTier } from '../lib/core/routing.js'
 import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/core/tiers.js'
+import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS } from '../lib/core/turbovec.js'
+import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
+import { decideAdvisorBudget } from '../lib/core/policy.js'
+import { softParseSections } from '../lib/core/consult.js'
 
 // ---- rm -rf detection (including split flags) -----------------------------
 
@@ -354,4 +358,437 @@ test('tier registry orders strong first and cheap last', () => {
   assert.equal(chainText(reg.get('cheap')), 'x/y@high')
   const snap = reg.snapshot()
   assert.equal(snap.strong.followSession, true)
+})
+
+// ---- turbovec: local embedding + 4-bit TurboQuant index -------------------
+
+test('embedCodeText produces a deterministic unit-norm vector', () => {
+  const a = embedCodeText('function getId() { return this.id }', 512)
+  const b = embedCodeText('function getId() { return this.id }', 512)
+  assert.equal(a.length, 512)
+  assert.equal(a.constructor, Float32Array)
+  assert.deepEqual(Array.from(a), Array.from(b))
+  let sum = 0
+  for (let i = 0; i < 512; i++) sum += a[i] * a[i]
+  assert.ok(Math.abs(Math.sqrt(sum) - 1) < 1e-5, 'unit norm')
+  const zero = embedCodeText('', 512)
+  assert.equal(zero.length, 512)
+})
+
+test('embedCodeText separates distinct code documents', () => {
+  const a = embedCodeText('export function parseRequest(req) { return req.body }', 512)
+  const b = embedCodeText('class Renderer { render(node) { return node.text } }', 512)
+  let dot = 0
+  for (let i = 0; i < 512; i++) dot += a[i] * b[i]
+  assert.ok(dot < 0.4, 'different documents are not strongly aligned: ' + dot)
+})
+
+test('rotateVector preserves inner products up to the FWHT scale factor', () => {
+  const a = embedCodeText('const x = computeHash(input)', 512)
+  const b = embedCodeText('const y = computeHash(input)', 512)
+  const ra = rotateVector(a, 512)
+  const rb = rotateVector(b, 512)
+  let dotAB = 0
+  let dotR = 0
+  for (let i = 0; i < 512; i++) {
+    dotAB += a[i] * b[i]
+    dotR += ra[i] * rb[i]
+  }
+  assert.ok(Math.abs(dotR - 512 * dotAB) < 1e-3 * 512, 'dot scaled by n: ' + dotR + ' vs ' + (512 * dotAB))
+})
+
+test('TurboQuant stores 256 bytes per vector at d=512', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: '1', path: 'src/a.ts', lines: '1-10', snippet: 'export function parseRequest(req) { return req.body }', stage: 'explore' })
+  const st = idx.stats()
+  assert.equal(st.bytes, 256)
+  assert.equal(st.entries, 1)
+  assert.equal(TURBO_LEVELS.length, 16)
+  assert.ok(TURBO_LEVELS[0] < TURBO_LEVELS[15], 'levels ascending')
+})
+
+test('TurboQuant search finds the relevant snippet', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'parse', path: 'src/parser.ts', lines: '1-25', snippet: 'export function parseRequest(req) { return req.body }', stage: 'explore' })
+  idx.upsert({ id: 'render', path: 'src/renderer.ts', lines: '3-30', snippet: 'class Renderer { render(node) { return node.text } }', stage: 'explore' })
+  const hits = idx.search('parseRequest body', { k: 1, minScore: 0.1 })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].id, 'parse')
+  assert.ok(hits[0].score > 0.1, 'score ' + hits[0].score)
+  const miss = idx.search('zzz qqq www unknown', { k: 5, minScore: 0.5 })
+  assert.equal(miss.length, 0)
+})
+
+test('TurboQuant pathFilter restricts results', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'a', path: 'src/a.ts', lines: '1', snippet: 'export function parseRequest(req) { return req.body }' })
+  idx.upsert({ id: 'b', path: 'src/b.ts', lines: '1', snippet: 'export function parseRequest(req) { return req.body }' })
+  const hits = idx.search('parseRequest', { k: 5, pathFilter: 'src/a.ts' })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].path, 'src/a.ts')
+})
+
+test('TurboQuant invalidateByPath removes the file snippets', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'a', path: 'src/a.ts', lines: '1-10', snippet: 'export function parseRequest(req) { return req.body }' })
+  idx.upsert({ id: 'c', path: 'src/c.ts', lines: '1-10', snippet: 'export function parseRequest(req) { return req.body }' })
+  assert.equal(idx.stats().entries, 2)
+  const removed = idx.invalidateByPath('src/a.ts')
+  assert.equal(removed, 1)
+  assert.equal(idx.stats().entries, 1)
+  const hits = idx.search('parseRequest', { k: 5, minScore: 0.05 })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].id, 'c')
+})
+
+test('TurboQuant upsert refreshes an existing path+lines entry', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'a', path: 'src/a.ts', lines: '1-10', snippet: 'old code', updatedAt: 1 })
+  const refreshed = idx.upsert({ id: 'a', path: 'src/a.ts', lines: '1-10', snippet: 'new code', updatedAt: 2 })
+  assert.equal(idx.stats().entries, 1)
+  assert.equal(refreshed.snippet, 'new code')
+  assert.equal(refreshed.updatedAt, 2)
+})
+
+test('TurboQuant export/import round-trip preserves search', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'parse', path: 'src/parser.ts', lines: '1-25', snippet: 'export function parseRequest(req) { return req.body }', stage: 'explore', updatedAt: 7 })
+  idx.upsert({ id: 'render', path: 'src/renderer.ts', lines: '3-30', snippet: 'class Renderer { render(node) { return node.text } }', stage: 'explore', updatedAt: 8 })
+  const state = idx.exportState()
+  assert.equal(state.version, 2)
+  assert.equal(state.entries.length, 2)
+  assert.ok(typeof state.entries[0].codes === 'string')
+  const idx2 = createTurboQuantIndex({ dim: 512 })
+  assert.equal(idx2.importState(state), true)
+  assert.equal(idx2.stats().entries, 2)
+  const h1 = idx.search('parseRequest body', { k: 1, minScore: 0.1 })
+  const h2 = idx2.search('parseRequest body', { k: 1, minScore: 0.1 })
+  assert.equal(h1[0].id, h2[0].id)
+  assert.ok(Math.abs(h1[0].score - h2[0].score) < 1e-9)
+})
+
+test('TurboQuant maxEntries evicts the oldest snippet', () => {
+  const idx = createTurboQuantIndex({ dim: 512, maxEntries: 2 })
+  idx.upsert({ id: 'a', path: 'a.ts', lines: '1', snippet: 'aaa', updatedAt: 1 })
+  idx.upsert({ id: 'b', path: 'b.ts', lines: '1', snippet: 'bbb', updatedAt: 2 })
+  idx.upsert({ id: 'c', path: 'c.ts', lines: '1', snippet: 'ccc', updatedAt: 3 })
+  assert.equal(idx.stats().entries, 2)
+  const paths = idx.exportState().entries.map((e) => e.path).sort()
+  assert.deepEqual(paths, ['b.ts', 'c.ts'])
+})
+
+test('TurboQuant upsert truncates free-text metadata', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  const big = 'x'.repeat(9000)
+  const entry = idx.upsert({ id: 'a', path: 'a.ts', lines: '1', snippet: big, note: big })
+  assert.equal(entry.snippet.length, 4000)
+  assert.equal(entry.note.length, 1000)
+  assert.equal(String(entry.lines).length, 1)
+})
+
+test('TurboQuant import skips corrupt entries and reports them', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 'good', path: 'good.ts', lines: '1-10', snippet: 'export function parseRequest(req) { return req.body }' })
+  const state = idx.exportState()
+  state.entries.push({ path: 'broken.ts', lines: '1', codes: '!!!!not-base64!!!!', norm: 1 })
+  const idx2 = createTurboQuantIndex({ dim: 512 })
+  assert.equal(idx2.importState(state), true)
+  assert.equal(idx2.stats().entries, 1)
+  assert.equal(idx2.stats().importSkipped, 1)
+})
+
+// ---- v0.8.1: digest cards, filters, deterministic sort, v2 import ----------
+
+test('upsertDigest stores cards and caps per stage at 8', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  for (let i = 0; i < 10; i++) {
+    idx.upsertDigest({ stage: 'implement', area: 'area-' + i, diffSummary: 'change ' + i, checks: 'pass' })
+  }
+  const st = idx.stats()
+  assert.equal(st.digests, 8)
+  assert.equal(st.snippets, 0)
+  // oldest (area-0, area-1) were evicted, newest 8 kept
+  const paths = idx.exportState().entries.filter((e) => e.kind === 'digest').map((e) => e.path).sort()
+  assert.deepEqual(paths, ['area-2', 'area-3', 'area-4', 'area-5', 'area-6', 'area-7', 'area-8', 'area-9'])
+})
+
+test('upsertDigest refreshes an existing area+stage card', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsertDigest({ stage: 'fix', area: 'parser', diffSummary: 'first', updatedAt: 1 })
+  const card = idx.upsertDigest({ stage: 'fix', area: 'parser', diffSummary: 'second', issues: 'edge case', updatedAt: 2 })
+  assert.equal(idx.stats().digests, 1)
+  assert.equal(card.snippet, 'second')
+  assert.ok(card.note.includes('edge case'))
+})
+
+test('invalidateByPath never removes digest cards', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 's', path: 'src/parser.ts', lines: '1-10', snippet: 'export function parseRequest(req) { return req.body }' })
+  idx.upsertDigest({ stage: 'implement', area: 'src/parser.ts', diffSummary: 'added validation' })
+  // area string equals the snippet path on purpose (collision guard)
+  const removed = idx.invalidateByPath('src/parser.ts')
+  assert.equal(removed, 1)
+  assert.equal(idx.stats().entries, 1)
+  assert.equal(idx.stats().digests, 1)
+  const hits = idx.search('added validation', { k: 5, minScore: 0.1, kindFilter: 'digest' })
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].kind, 'digest')
+})
+
+test('search filters by kindFilter, stageFilter and array pathFilter', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 's1', path: 'src/a.ts', lines: '1', snippet: 'export function parseRequest(req) { return req.body }', stage: 'explore' })
+  idx.upsert({ id: 's2', path: 'src/b.ts', lines: '1', snippet: 'export function parseRequest(req) { return req.body }', stage: 'explore' })
+  idx.upsertDigest({ stage: 'implement', area: 'src/a.ts', diffSummary: 'implemented parseRequest with tests' })
+  idx.upsertDigest({ stage: 'fix', area: 'src/c.ts', diffSummary: 'fixed parseRequest leak' })
+  // kindFilter
+  const d = idx.search('parseRequest implement', { k: 5, minScore: 0.05, kindFilter: 'digest' })
+  assert.ok(d.length >= 1)
+  assert.ok(d.every((h) => h.kind === 'digest'))
+  // stageFilter
+  const impl = idx.search('parseRequest', { k: 5, minScore: 0.05, kindFilter: 'digest', stageFilter: 'implement' })
+  assert.ok(impl.every((h) => h.stage === 'implement'))
+  // array pathFilter
+  const inA = idx.search('parseRequest', { k: 10, minScore: 0.05, pathFilter: ['src/a.ts'] })
+  assert.ok(inA.every((h) => h.path === 'src/a.ts' || h.path.startsWith('src/a.ts/')))
+  const both = idx.search('parseRequest', { k: 10, minScore: 0.05, pathFilter: ['src/a.ts', 'src/b.ts'] })
+  assert.ok(both.some((h) => h.path === 'src/a.ts'))
+  assert.ok(both.some((h) => h.path === 'src/b.ts'))
+})
+
+test('search sorts deterministically on equal scores', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: '1', path: 'z.ts', lines: '1', snippet: 'export const x = 1' })
+  idx.upsert({ id: '2', path: 'a.ts', lines: '1', snippet: 'export const x = 1' })
+  const hits = idx.search('export const x = 1', { k: 5, minScore: 0.05 })
+  assert.ok(hits.length >= 2)
+  const order1 = hits.map((h) => h.path).join(',')
+  const hits2 = idx.search('export const x = 1', { k: 5, minScore: 0.05 })
+  assert.equal(order1, hits2.map((h) => h.path).join(','))
+  assert.ok(hits[0].score >= hits[1].score)
+})
+
+test('import v1 and v2 both work; digests survive a v2 round-trip', () => {
+  const idx = createTurboQuantIndex({ dim: 512 })
+  idx.upsert({ id: 's', path: 'src/a.ts', lines: '1', snippet: 'export function parseRequest(req) { return req.body }' })
+  idx.upsertDigest({ stage: 'implement', area: 'src/a.ts', diffSummary: 'implemented with tests' })
+  const state = idx.exportState()
+  assert.equal(state.version, 2)
+  // v1 compatibility: a legacy export carries snippets only, no kind field
+  const v1 = {
+    version: 1,
+    dim: state.dim,
+    maxEntries: state.maxEntries,
+    entries: state.entries.filter((e) => e.kind !== 'digest').map(({ kind, ...rest }) => rest),
+  }
+  const idxV1 = createTurboQuantIndex({ dim: 512 })
+  assert.equal(idxV1.importState(v1), true)
+  assert.equal(idxV1.stats().snippets, 1)
+  assert.equal(idxV1.stats().digests, 0)
+  const idx2 = createTurboQuantIndex({ dim: 512 })
+  assert.equal(idx2.importState(state), true)
+  assert.equal(idx2.stats().digests, 1)
+  const hits = idx2.search('implemented with tests', { k: 5, minScore: 0.05, kindFilter: 'digest' })
+  assert.equal(hits.length, 1)
+})
+
+// ---- sidekick contracts ---------------------------------------------------
+
+test('sidekick registry covers explore/implement/fix', () => {
+  assert.deepEqual(SIDEKICK_STAGES, ['explore', 'implement', 'fix'])
+  for (const stage of SIDEKICK_STAGES) {
+    const spec = sidekickSpec(stage)
+    assert.ok(spec, stage + ' spec exists')
+    assert.equal(typeof spec.system, 'string')
+    assert.equal(typeof spec.buildUser, 'function')
+    assert.equal(typeof spec.parse, 'function')
+  }
+  assert.equal(sidekickSpec('nope'), undefined)
+})
+
+test('formatCard renders a card deterministically without timestamps', () => {
+  const card = { stage: 'implement', path: 'src/parser.ts', snippet: 'added validation', note: 'npm test: pass\nno issues' }
+  const t = formatCard(card)
+  assert.ok(t.startsWith('• [implement/src/parser.ts] '), t)
+  assert.ok(t.includes('added validation'))
+  assert.ok(t.includes('npm test: pass'))
+  assert.equal(t, formatCard(card))
+})
+
+test('sidekick buildUser has a byte-stable prefix per stage', () => {
+  for (const stage of SIDEKICK_STAGES) {
+    const a = sidekickSpec(stage).buildUser({ task: 'first task', paths: ['src'] })
+    const b = sidekickSpec(stage).buildUser({ task: 'second task', paths: ['other'] })
+    const cut = 'Task: '
+    const ia = a.indexOf(cut)
+    const ib = b.indexOf(cut)
+    assert.ok(ia > 0 && ib > 0, stage + ' has a Task: line')
+    assert.equal(a.slice(0, ia), b.slice(0, ib), stage + ' stable prefix')
+    assert.ok(b.startsWith(a.slice(0, ia)), stage + ' prefix is a real prefix')
+  }
+})
+
+test('sidekick buildUser appends cards and snippets after the stable prefix', () => {
+  const user = sidekickSpec('implement').buildUser({
+    task: 'write parser',
+    cards: [formatCard({ stage: 'implement', path: 'src/parser.ts', snippet: 'added validation', note: 'pass' })],
+    snippets: [{ path: 'src/parser.ts', lines: '1-25', snippet: 'export function parseRequest(req) {}' }],
+  })
+  assert.ok(user.includes('Previous outcomes (memory):'))
+  assert.ok(user.includes('• [implement/src/parser.ts]'))
+  assert.ok(user.includes('Known cached snippets'))
+})
+
+test('resolveSidekickTarget: stage override wins, else cheap tier', () => {
+  const state = {
+    tiers: { get: () => ({ provider: 'p-cheap', model: 'm-cheap', reasoningEffort: 'low' }) },
+    sidekick: {
+      explore: { provider: 'p-exp', model: 'm-exp', reasoningEffort: 'high' },
+      implement: { provider: 'p-imp', model: 'm-imp' },
+      fix: null,
+    },
+  }
+  assert.deepEqual(resolveSidekickTarget('explore', state), { provider: 'p-exp', model: 'm-exp', reasoningEffort: 'high' })
+  assert.deepEqual(resolveSidekickTarget('implement', state), { provider: 'p-imp', model: 'm-imp' })
+  assert.deepEqual(resolveSidekickTarget('fix', state), { provider: 'p-cheap', model: 'm-cheap', reasoningEffort: 'low' })
+  assert.equal(resolveSidekickTarget('explore', { sidekick: {}, tiers: null }), null)
+})
+
+test('parseExploreSnippets parses strict format, blocks, and JSON', () => {
+  const strict = [
+    'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | parses the request body',
+    'Snippet: src/renderer.ts | 3-30 | class Renderer { render(node) { return node.text } } | renders a node',
+  ].join('\n')
+  const out = parseExploreSnippets(strict)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].path, 'src/parser.ts')
+  assert.equal(out[0].lines, '1-25')
+  assert.ok(out[0].snippet.includes('parseRequest'))
+  assert.equal(out[0].summary, 'parses the request body')
+
+  const blocks = [
+    '- File: src/a.ts',
+    '  Lines: 10-20',
+    '  Snippet: export const x = 1',
+    '  Summary: defines x',
+    '- File: src/b.ts',
+    '  Snippet: import y from "./y"',
+  ].join('\n')
+  const b = parseExploreSnippets(blocks)
+  assert.equal(b.length, 2)
+  assert.equal(b[0].path, 'src/a.ts')
+  assert.equal(b[0].lines, '10-20')
+  assert.equal(b[1].path, 'src/b.ts')
+
+  const json = JSON.stringify([
+    { path: 'src/c.ts', lines: '1', snippet: '// c', summary: 'see' },
+    { path: 'src/d.ts', lines: '2', snippet: '// d', summary: 'dee' },
+  ])
+  const j = parseExploreSnippets(json)
+  assert.equal(j.length, 2)
+  assert.equal(j[0].path, 'src/c.ts')
+  assert.equal(parseExploreSnippets('no snippets here').length, 0)
+})
+
+test('parseChangeReport extracts touched files, summary and checks', () => {
+  const text = [
+    'Touched files:',
+    '- src/parser.ts',
+    '- tests/parser.test.ts',
+    'Diff summary: added body validation and tests.',
+    'Checks: npm test: pass; eslint: clean',
+  ].join('\n')
+  const r = parseChangeReport(text, true)
+  assert.deepEqual(r.touchedFiles, ['src/parser.ts', 'tests/parser.test.ts'])
+  assert.equal(r.diffSummary, 'added body validation and tests.')
+  assert.ok(r.checks.includes('npm test'))
+
+  const json = JSON.stringify({ touchedFiles: ['src/a.ts'], diffSummary: 'x', checks: 'pass' })
+  const j = parseChangeReport(json, true)
+  assert.deepEqual(j.touchedFiles, ['src/a.ts'])
+  assert.equal(j.diffSummary, 'x')
+})
+
+// ---- advisor budget -------------------------------------------------------
+
+test('decideAdvisorBudget allows under the limit', () => {
+  assert.deepEqual(decideAdvisorBudget(0, 2, 30), { action: 'allow' })
+  assert.deepEqual(decideAdvisorBudget(1, 2, 30), { action: 'allow' })
+})
+
+test('decideAdvisorBudget asks at the limit when confirmation is configured', () => {
+  const d = decideAdvisorBudget(2, 2, 30)
+  assert.equal(d.action, 'ask')
+  assert.equal(d.timeoutMs, 30000)
+})
+
+test('decideAdvisorBudget denies when confirmation is disabled', () => {
+  const d = decideAdvisorBudget(2, 2, 0)
+  assert.equal(d.action, 'deny')
+  assert.ok(d.reason.includes('limit (2)'))
+})
+
+// ---- childRouteSource: keepSeed / forceTier ------------------------------
+
+test('childRouteSource: keepSeed preserves the seed verbatim', () => {
+  assert.equal(childRouteSource({ keepSeed: true, escalated: false, pinned: false, explicit: true }), 'keep')
+  assert.equal(childRouteSource({ keepSeed: true, escalated: false, pinned: false, explicit: false }), 'keep')
+})
+
+test('childRouteSource: escalation and pins outrank keepSeed', () => {
+  assert.equal(childRouteSource({ keepSeed: true, escalated: true, pinned: false }), 'tier')
+  assert.equal(childRouteSource({ keepSeed: true, escalated: false, pinned: true }), 'tier')
+})
+
+test('childRouteSource: forceTier skips the explicit-keep branch', () => {
+  assert.equal(childRouteSource({ explicit: true, forceTier: true, escalated: false, pinned: false }), 'tier')
+  assert.equal(childRouteSource({ explicit: true, forceTier: false, escalated: false, pinned: false }), 'keep')
+  assert.equal(childRouteSource({ explicit: true, forceTier: undefined, escalated: false, pinned: false }), 'keep')
+})
+
+// ---- consultation soft parsing ---------------------------------------------
+
+test('softParseSections parses JSON structured fields', () => {
+  const json = JSON.stringify({ risks: ['a', 'b'], nextSteps: 'do x', acceptanceChecks: ['t1'] })
+  const out = softParseSections(json, ['risks', 'nextSteps', 'acceptanceChecks'])
+  assert.deepEqual(out.risks, ['a', 'b'])
+  assert.deepEqual(out.nextSteps, ['do x'])
+  assert.deepEqual(out.acceptanceChecks, ['t1'])
+})
+
+test('softParseSections parses Markdown sections', () => {
+  const md = [
+    '## Risks',
+    '- auth tokens may leak',
+    '- cache is unbounded',
+    '## Next steps',
+    '1. add TTL',
+    '2. test',
+    '## Acceptance criteria',
+    '- all tests pass',
+  ].join('\n')
+  const out = softParseSections(md, ['risks', 'nextSteps', 'acceptanceChecks'])
+  assert.equal(out.risks.length, 2)
+  assert.ok(out.risks[0].includes('auth'))
+  assert.equal(out.nextSteps.length, 2)
+  assert.equal(out.acceptanceChecks.length, 1)
+})
+
+test('softParseSections tolerates plain text without sections', () => {
+  const out = softParseSections('just advice, no sections', ['risks'])
+  assert.equal(out.risks, undefined)
+})
+
+test('softParseSections edge cases: empty input, empty sections, partial JSON', () => {
+  assert.deepEqual(softParseSections('', ['risks']), {})
+  assert.deepEqual(softParseSections('   ', ['risks']), {})
+  // section header with no items → the key is omitted (no empty arrays)
+  const emptySection = '## Risks\n## Next steps\n- do x\n'
+  const out = softParseSections(emptySection, ['risks', 'nextSteps'])
+  assert.equal(out.risks, undefined)
+  assert.deepEqual(out.nextSteps, ['do x'])
+  // broken JSON falls through to the Markdown scan without throwing
+  const broken = '{ "risks": [unclosed'
+  const b = softParseSections(broken, ['risks'])
+  assert.ok(b, 'never throws')
 })

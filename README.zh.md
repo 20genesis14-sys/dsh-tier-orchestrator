@@ -102,6 +102,24 @@ sequenceDiagram
   对应路由。自动升级始终受 TTL 限制，不会永久覆盖 worker 显式选择的档位。
 - **难度升级规则注入**：向系统提示词注入升级门（歧义未消、架构 / 安全 / 数据完整性、
   两次失败、收尾高风险等条件），模型在决策点调用 `tier_advisor` / `tier_review`。
+- **智能模式（`/tier smart`）**：主代理固定在规划档（三档布局为 `main`，否则 `strong`），
+   不直接改文件——`write`/`edit`/`multi_edit`/`patch` 会被守卫拒绝。工作委托给
+   `tier_sidekick` 三阶段：`explore`（紧凑文件片段）、`implement`（代码/测试/lint）、
+   `fix`（修 bug）。每阶段可用独立模型（`/tier set sidekick-<stage> <provider> <model>
+   [effort]`），默认为低成本档。
+- **顾问每轮预算**：`tier_advisor` 在每轮用户对话里免费允许 `advisorMaxCallsPerTurn`
+   次（默认 2）；下一次通过 approval 通道请求确认（30 秒超时），未获确认则失败关闭。
+   新用户消息会重置预算。`forceTierOnExplicitModel`（默认关）让显式模型的子代理
+   也按档位规则路由，而不是保留种子路由。
+- **TurboQuant 4-bit 片段缓存**：本地代码向量化（d=512，Signed Feature Hashing + FWHT），
+   以 4-bit 向量（每条 256 字节）持久化到 `.dsh-turbovec-cache.json`
+   （走 `ctx.fs`，不可写时退回内存）。`tier_sidekick` 检索片段并注入提示词。
+   `/tier cache status|clear|search <query>`。
+- **Digest 卡片 + 稳定前缀（v0.8.1）**：每个完成的 sidekick 阶段写入记忆卡片
+   （diffSummary/checks/issues，每阶段上限 8），同阶段后续调用会作为
+   `Previous outcomes (memory):` 注入。提示词使用固定的阶段前缀组装，使重复调用
+   共享逐字节相同的前缀，利于 provider 端提示词缓存复用。片段检索会按 `paths[]`
+   限定范围（`k` 提升至 8）并使用更宽松的匹配阈值。
 
 ## 安装
 
@@ -138,7 +156,7 @@ dsh plugin --profile web add .
    - 两个 tier 各自的 provider/model/effort
    - `diag:` 行实时计数器
 4. 该会话里必须能调用 `tier_status` / `tier_route` / `tier_configure` /
-   `tier_advisor` / `tier_review` / `tier_worker` 六个工具。
+   `tier_advisor` / `tier_review` / `tier_worker` / `tier_sidekick` 七个工具。
 5. 廉价档执行期间，高危命令（如 `rm -rf`、`sudo …`）必须被守卫拒绝并给出升级提示。
 6. `/tier set strong <provider> <model> [effort]` 必须回复 `Saved to
    tier-router settings.` 且重启后仍然生效。
@@ -156,6 +174,8 @@ dsh plugin --profile web add .
 /tier strong | cheap                        # 本会话强制走某档（可选持久化为会话默认）
 /tier auto                                  # 本会话恢复自动（计划模式→强档，执行→弱档）
 /tier delegated                             # 主会话保持模型选择器，仅对子代理分层
+/tier smart                                 # 主代理固定在规划档；文件修改交给 tier_sidekick
+/tier cache <status|clear|search <query>>   # 查看/清空 TurboQuant 片段缓存或按查询检索
 /tier off                                   # 本会话关闭路由并恢复默认模型（不影响其他会话）
 /tier plan                                  # auto + 进入计划模式，并立即应用强档 header
 /tier models                                # 列出已注册 provider 与其模型
@@ -164,9 +184,13 @@ dsh plugin --profile web add .
 /tier roles <on|off>                        # 顾问与审查使用各自模型，或走强档路由
 /tier gate explore <n>                      # exit_plan_mode 前所需的读/检索调用次数（0 关闭）
 /tier gate advisor <on|off>                 # 计划提交前由顾问先评审一次
+/tier gate advisor-limit <n> [timeoutSec]   # 每轮用户对话的免费 tier_advisor 次数；超限需确认
 /tier set <strong|main|cheap|advisor|reviewer> <provider> <model> [effort]
 /tier set <strong|main> follow-session      # 跟随会话模型选择
+/tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
+                                            # smart 模式各阶段的 sidekick 模型（留空 = 低成本档）
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # 子代理路由；caller 仅用于 fork，capped 不超过主档
+/tier subagent force-explicit <on|off>      # 显式模型的子代理也按档位规则路由（默认关）
 /tier review <评审焦点>                       # 强档模型评审
 ```
 
@@ -189,8 +213,9 @@ Tiered model routing
 | --- | --- |
 | `tier_advisor` | 强档咨询：一个问题 + 证据 → 建议 / 风险 / 验收条件 |
 | `tier_review` | 强档评审：变更集 + 验证结果 → 判定与分级问题 |
-| `tier_route` | 设置**本会话**档位（strong/cheap/auto/delegated/off，可选持久化） |
+| `tier_route` | 设置**本会话**档位（strong/cheap/auto/delegated/smart/off，可选持久化） |
 | `tier_configure` | 重配任意档位的 provider/model/effort 与 subagent 策略 |
+| `tier_sidekick` | smart 模式委托：按阶段（`explore`/`implement`/`fix`）派生子代理，注入 TurboQuant 缓存片段 |
 | `tier_worker` | 按档派发子代理执行有界任务包；支持 outputSchema / agentPreset / maxDepth / background |
 | `tier_status` | 只读诊断：全局与本会话档位、升级状态、监听器计数器、生效档位 |
 
