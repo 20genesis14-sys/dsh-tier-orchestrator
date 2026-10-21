@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const files = ['lib/index.js']
-for (const dir of ['lib/core', 'lib/dsh']) {
+const files = []
+for (const dir of ['lib', 'lib/core', 'lib/dsh']) {
   for (const f of readdirSync(join(ROOT, dir))) {
     if (f.endsWith('.js')) files.push(join(dir, f))
   }

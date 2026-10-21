@@ -54,6 +54,20 @@ test('cordis.patch declares the host entry plus the tiered preset composition', 
   }
 })
 
+test('cordis.patch declares the pi-like minimal preset', () => {
+  assert.match(patch, /id:\s*preset-tiered-minimal/)
+  assert.match(patch, /id:\s*tiered-minimal/)
+  const minimalBlock = patch.slice(patch.indexOf('preset-tiered-minimal'))
+  // The minimal preset drives the router row in promptMode=pi.
+  assert.match(minimalBlock, /promptMode:\s*pi/)
+  // Excluded roster spot-checks within the minimal block.
+  for (const name of ['dsh-tool-subagent', 'dsh-tool-web', 'dsh-skill-filesystem', 'dsh-tool-fs', 'dsh-tool-ask-user', 'dsh-tool-todo', 'dsh-workflow-ptc', 'dsh-plugin-manager', 'dsh-plugin-market']) {
+    assert.ok(!new RegExp("name: '@deepseek-ai/" + name + "'").test(minimalBlock), 'minimal preset must not include ' + name)
+  }
+  // Host row documents the informational default for new sessions.
+  assert.match(patch, /promptProfile:\s*standard/)
+})
+
 test('client bundle follows the ModuleLoader/slot contract', () => {
   const src = readFileSync(join(ROOT, 'client', 'client.js'), 'utf8')
   assert.match(src, /__ModuleLoader__\.load/)

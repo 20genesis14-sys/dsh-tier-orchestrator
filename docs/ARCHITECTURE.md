@@ -353,3 +353,37 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
   snippets/digests/hits.
 - **Cache format v2** with per-entry `kind`; v1 imports still load (all
   entries become snippets). `stats()` gains `snippets`/`digests`.
+
+## 12. v0.9.0 additions: the `tiered-minimal` preset and `promptMode`
+
+### Preset split
+
+- `cordis.patch.yml` gains a third row, `preset-tiered-minimal`
+  (`@deepseek-ai/dsh-agent-preset`, id `tiered-minimal`, order 30): persona
+  one-liner (`complete: true`, `includeRuntimeContext: false`), a persistent
+  platform terminal group (`dsh-terminal` + `dsh-terminal-bash` +
+  `dsh-tool-bash-persistent` on POSIX, `shellDialect: pwsh` +
+  `dsh-tool-pwsh-persistent` on Windows), compaction, plan mode on demand,
+  and the agent-plane `tier-routing` row with `promptMode: pi`.
+- Excluded roster: skills, jobs, schedule, goal, todo, web, present,
+  ask-user, subagents/workflow, fs-search, plugin-manager/market, MCP.
+
+### `promptMode` (agent row, non-volatile)
+
+- `Config.promptMode: 'standard' | 'pi'` is set per preset; the host-row
+  `promptProfile` field is informational only (recommended default for new
+  sessions) and is not read by routing.
+- `lib/core/prompt-section.js` builds the `tier-routing` system-prompt
+  section: `standard` emits the full guidance block; `pi` collapses to a few
+  lines — tier names, the current mode, and a hint to delegate tasks needing
+  tools outside the minimal set via `tier_worker` with `agentPreset: tiered`.
+
+### `lib/minimal-fs-tools.js`
+
+- Only mounted when `promptMode === 'pi'` **and** the fs seams exist
+  (`fsResolve`/`fsReadText`/`fsWriteText`/`fsEditText`, the last added to
+  `OPTIONAL_SEAMS` in this release). Registers Pi-shaped `read` / `write` /
+  `edit` with sparse schemas and no fs-observation-policy (an edit does not
+  require a prior read; `edit` accepts a list of disjoint replacements).
+- All file access goes through the mounted `ctx.fs` backend — containment is
+  the harness's job, as with the TurboQuant cache.

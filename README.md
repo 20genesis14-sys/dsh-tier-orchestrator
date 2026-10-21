@@ -184,11 +184,18 @@ dsh plugin --profile web add dsh-tier-router
 # Local development uses the same installation path:
 dsh plugin --profile web add .
 
-# 2. Restart DSH, then choose "tiered" in the preset picker for a new session
-#    (or make it the profile default). Configure on the Plugins page: the
-#    dsh-tier-router card expands into the "Tier routing" form once a session
-#    on the tiered preset has run (the settings namespace is host-served).
+# 2. Restart DSH, then choose "tiered" or "tiered-minimal" in the preset
+#    picker for a new session (or make it the profile default). Configure on
+#    the Plugins page: the dsh-tier-router card expands into the "Tier
+#    routing" form once a session on either preset has run (the settings
+#    namespace is host-served).
 ```
+
+Two presets are provided:
+
+- **`tiered`** — the standard roster: full DSH toolset plus tiered routing.
+- **`tiered-minimal`** — a Pi-like minimal prompt (see
+  [Minimal preset](#minimal-preset-tiered-minimal)).
 
 Uninstall: `dsh plugin --profile web remove dsh-tier-router` removes both the
 host entry and the `tiered` preset on the next startup.
@@ -215,6 +222,34 @@ host entry and the `tiered` preset on the next startup.
 
 If `/tier status` is unavailable, the row is missing from the session's preset
 (see Installation) or the session predates the preset switch.
+
+### Minimal preset (`tiered-minimal`)
+
+A Pi-style minimal prompt for users who want the leanest possible agent:
+
+- **Persona**: one line (`You are an expert coding assistant.`), no
+  time-context, no workspace-instruction budget (`agent-instructions`).
+- **Tools**: exactly the Pi-shaped `read` / `write` / `edit` (registered by
+  this plugin with sparse schemas; no fs-observation-policy, so edits do not
+  require a prior read) plus the platform terminal — `bash` on POSIX,
+  `pwsh` on Windows — with a one-line description. No skills, jobs, schedule,
+  goal, todo, web, present, ask-user, subagents/workflow, fs-search, MCP, or
+  plugin-manager tools.
+- **System prompt**: the `tier-routing` section collapses to a few lines.
+  Full routing guidance is available on demand via `tier_advisor`,
+  `tier_review`, `tier_worker`, and `/tier`. A built-in hint tells the model
+  to delegate tasks needing tools outside the minimal set (e.g. web, skills)
+  via `tier_worker` with `agentPreset: tiered`, so heavy work can happen
+  automatically without leaving the minimal session.
+- **Plan mode**: still available; its instruction section enters the prompt
+  only while plan mode is active.
+- **Context compaction**: enabled.
+
+Routing, escalation, fallback, and the advisor/review tools work identically
+in both presets. Excluded capabilities are not lost: use them in a session on
+the `tiered` preset, or spawn a worker on it from a minimal session with
+`tier_worker` + `agentPreset: tiered`. The preset is chosen at session
+creation; existing sessions keep theirs (DSH behavior).
 
 ## Usage
 

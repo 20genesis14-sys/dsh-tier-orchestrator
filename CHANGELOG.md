@@ -2,6 +2,24 @@
 
 All notable changes to dsh-tier-router are documented here.
 
+## [0.9.0] - 2026-10-21
+
+### Added
+
+- **Pi-like minimal preset (`tiered-minimal`).** A second agent preset that
+  mirrors Pi's minimal-prompt philosophy: a one-line persona, exactly the
+  Pi-style tools `read` / `write` / `edit` (registered by this plugin with
+  sparse schemas and no fs-observation-policy) plus the platform terminal
+  (`bash` on POSIX, `pwsh` on Windows), context compaction, and plan mode on
+  demand. Skills, jobs, schedule, goal, todo, web, present, ask-user,
+  subagents/workflow, fs-search, and MCP are excluded; heavy guidance loads on
+  demand via `tier_advisor` / `tier_review` / `tier_worker`. In this preset
+  the `tier-routing` prompt section collapses to a few lines, including a
+  hint telling the model to delegate tasks needing tools outside the minimal
+  set via `tier_worker` with `agentPreset: tiered` (automatic heavy work from
+  the minimal session). Host setting `promptProfile` documents the
+  recommended default for new sessions.
+
 ## [0.8.1] - 2026-10-21
 
 ### Added

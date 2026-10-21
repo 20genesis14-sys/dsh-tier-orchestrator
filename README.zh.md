@@ -138,10 +138,15 @@ dsh plugin --profile web add dsh-tier-router
 # 本地开发同样使用该安装路径：
 dsh plugin --profile web add .
 
-# 2. 重启 DSH，在新会话的预设选择器中选择 “tiered”（或设为默认）。
-#    配置入口：插件管理页 → dsh-tier-router 卡片 → 展开出 “Tier routing”
-#    设置表单（命名空间由 host 提供，需先用 tiered 预设跑过一个会话）。
+# 2. 重启 DSH，在新会话的预设选择器中选择 “tiered” 或 “tiered-minimal”
+#    （或设为默认）。配置入口：插件管理页 → dsh-tier-router 卡片 → 展开出
+#    “Tier routing” 设置表单（命名空间由 host 提供，需先用任一预设跑过一个会话）。
 ```
+
+提供两个预设：
+
+- **`tiered`** — 标准组合：完整 DSH 工具集 + 分档路由。
+- **`tiered-minimal`** — Pi 式极简提示（见 [极简预设](#极简预设tiered-minimal)）。
 
 卸载：`dsh plugin --profile web remove dsh-tier-router`，下次启动后 host 条目与
 `tiered` preset 一并消失。
@@ -163,6 +168,28 @@ dsh plugin --profile web add .
 
 如果 `/tier status` 不可用：说明该会话的 preset 里缺 `tier-routing` 行（见"安装"），
 或该会话创建于切换默认 preset 之前。
+
+### 极简预设（`tiered-minimal`）
+
+Pi 式极简提示，适合想要最精简 agent 的用户：
+
+- **Persona**：一行（`You are an expert coding assistant.`），无 time-context，
+  无 workspace 指令预算（`agent-instructions`）。
+- **工具**：只有 Pi 风格的 `read` / `write` / `edit`（由本插件注册，schema 精简，
+  无 fs-observation-policy——编辑不要求先读）加平台终端——POSIX 用 `bash`，
+  Windows 用 `pwsh`——描述仅一行。不含 skills、jobs、schedule、goal、todo、
+  web、present、ask-user、subagents/workflow、fs-search、MCP、plugin-manager 工具。
+- **系统提示**：`tier-routing` 段折叠为几行；完整路由指引按需通过
+  `tier_advisor` / `tier_review` / `tier_worker` / `/tier` 获取。内置提示会告诉模型：
+  需要最小集之外工具（如 web、skills）的任务，应通过 `tier_worker` +
+  `agentPreset: tiered` 自动委托，无需离开极简会话。
+- **Plan 模式**：仍可用；其指令段只在 plan 模式激活时进入提示。
+- **上下文压缩**：启用。
+
+路由、升级、fallback、advisor/review 工具在两个预设中行为一致。被排除的能力
+并未丢失：在 `tiered` 预设的会话中使用，或在极简会话里用 `tier_worker` +
+`agentPreset: tiered` 派生带完整工具的子代理。预设在新会话创建时选择；已有会话
+保留原预设（DSH 行为）。
 
 ## 使用
 
