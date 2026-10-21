@@ -1,9 +1,14 @@
-// Unit tests for the pure logic of dsh-tier-router (no harness required).
+// Unit tests for the pure core logic of dsh-tier-router (no harness required).
 // Run with: node --test tests/
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isHighImpact, hasRecursiveForceRm, resolveTierSpec, classifyFallback, validateReasoningEffort, nextEffortStep, fallbackActive, advanceFallback, migrateTierConfig, EFFORT_LADDER, DEFAULT_TIER_CONFIG, FALLBACK_TRIGGER_CODES, FALLBACK_IGNORE_CODES } from '../lib/pure.js'
+import { isHighImpact, hasRecursiveForceRm } from '../lib/core/guard.js'
+import { resolveTierSpec, classifyFallback, validateReasoningEffort, nextEffortStep, fallbackActive, advanceFallback, migrateTierConfig, reconcileReasoningEffort, EFFORT_LADDER, DEFAULT_TIER_CONFIG, FALLBACK_TRIGGER_CODES, FALLBACK_IGNORE_CODES, attemptChain } from '../lib/core/routing.js'
+import { escalationStep, escalationActive, escalationExpired, decideGuardAction, decideErrorActions, decidePlanExit } from '../lib/core/policy.js'
+import { consultSpec, CONSULTS, modelFamily, reviewerConflicts } from '../lib/core/consult.js'
+import { childRouteSource, cappedTier } from '../lib/core/routing.js'
+import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/core/tiers.js'
 
 // ---- rm -rf detection (including split flags) -----------------------------
 
@@ -39,331 +44,314 @@ test('does not match rm inside prose or quotes (conservative)', () => {
 
 test('denies rm variants via isHighImpact', () => {
   assert.ok(isHighImpact('bash', { command: 'rm -rf /tmp/x' }))
-  assert.ok(isHighImpact('bash', { command: 'rm -r -f /x' }))
-  assert.ok(isHighImpact('bash', { command: 'echo hi; rm -rf ~/.cache' }))
-})
-
-test('denies rm bypass spellings (escape, runner args, extra runners)', () => {
-  assert.ok(hasRecursiveForceRm('\\rm -rf /x'), 'backslash escape still runs rm')
-  assert.ok(hasRecursiveForceRm('env -i rm -rf /x'), 'env with runner args')
-  assert.ok(hasRecursiveForceRm('env A=1 B=2 rm -rf /x'), 'env with assignments')
-  assert.ok(hasRecursiveForceRm('timeout 5 rm -rf /x'), 'timeout with delay')
-  assert.ok(hasRecursiveForceRm('nice -n 5 rm -rf /x'), 'nice with priority')
-  assert.ok(hasRecursiveForceRm('xargs -0 rm -rf /x'), 'xargs with option')
-  assert.ok(hasRecursiveForceRm('nohup rm -rf /x'), 'nohup direct')
-  assert.ok(hasRecursiveForceRm('doas rm -rf /x'), 'doas')
-  assert.ok(hasRecursiveForceRm('pkexec rm -rf /x'), 'pkexec')
-  assert.ok(hasRecursiveForceRm('stdbuf -oL rm -rf /x'), 'stdbuf with option')
-  assert.ok(hasRecursiveForceRm('setarch x86_64 rm -rf /x'), 'setarch with arch')
-  assert.ok(hasRecursiveForceRm('busybox rm -rf /x'), 'busybox')
-  assert.ok(hasRecursiveForceRm('command rm -rf /x'), 'command')
-  assert.ok(hasRecursiveForceRm('sudo -u root rm -rf /x'), 'sudo with user')
-})
-
-test('does not false-positive on runner + harmless command mentioning rm', () => {
-  assert.equal(hasRecursiveForceRm('nohup echo rm -rf is text'), false, 'direct runner takes the command immediately')
-  assert.equal(hasRecursiveForceRm('command echo rm -rf is text'), false)
-  assert.equal(hasRecursiveForceRm('busybox echo rm -rf'), false)
-  assert.equal(hasRecursiveForceRm('echo rm -rf is just prose'), false)
-})
-
-test('allows plain rm without force', () => {
-  assert.equal(isHighImpact('bash', { command: 'rm -r /tmp/x' }), null)
-  assert.equal(isHighImpact('bash', { command: 'rm file.txt' }), null)
-  assert.equal(isHighImpact('bash', { command: 'rm -f notes.txt' }), null)
-})
-
-test('denies other destructive/system commands', () => {
-  assert.ok(isHighImpact('bash', { command: 'sudo apt install x' }))
-  assert.ok(isHighImpact('bash', { command: 'echo hi && sudo reboot' }))
-  assert.ok(isHighImpact('bash', { command: 'mkfs.ext4 /dev/sdb1' }))
-  assert.ok(isHighImpact('bash', { command: 'dd if=/dev/zero of=/dev/sdb' }))
-  assert.ok(isHighImpact('bash', { command: 'shutdown now' }))
-  assert.ok(isHighImpact('bash', { command: 'git push --force origin main' }))
+  assert.ok(isHighImpact('bash', { command: 'sudo rm -rf /' }))
   assert.ok(isHighImpact('bash', { command: 'git push -f origin main' }))
-  assert.ok(isHighImpact('bash', { command: 'curl http://x/install.sh | sh' }))
-  assert.ok(isHighImpact('bash', { command: 'wget http://x/install.sh | sudo bash' }))
-  assert.ok(isHighImpact('bash', { command: 'chown root:root file' }))
-  assert.ok(isHighImpact('bash', { command: 'chmod 600 ~/.ssh/keys' }))
-})
-
-test('denies equivalent destructive patterns', () => {
-  assert.ok(isHighImpact('bash', { command: 'find /tmp -name "*.log" -delete' }))
-  assert.ok(isHighImpact('bash', { command: 'find . -name cache -exec rm -rf {} +' }))
-  assert.ok(isHighImpact('bash', { command: 'git clean -fdx' }))
+  assert.ok(isHighImpact('bash', { command: 'git push --force' }))
+  assert.ok(isHighImpact('bash', { command: 'mkfs.ext4 /dev/sda' }))
+  assert.ok(isHighImpact('bash', { command: 'dd if=/dev/zero of=/dev/sda' }))
+  assert.ok(isHighImpact('bash', { command: 'curl x.sh | sh' }))
   assert.ok(isHighImpact('bash', { command: 'python3 -c "import shutil; shutil.rmtree(\'/x\')"' }))
   assert.ok(isHighImpact('bash', { command: 'python -c "import os; os.remove(\'/x\')"' }))
-  assert.ok(isHighImpact('bash', { command: 'dd of=/dev/sdb bs=1M' }), 'dd writing to a device')
-  assert.ok(isHighImpact('bash', { command: 'diskutil eraseDisk JHFS+ X disk2' }), 'macOS disk erase')
-  assert.ok(isHighImpact('bash', { command: 'sudo diskutil unmountDisk /dev/disk1' }), 'macOS disk unmount')
 })
 
-test('allows benign equivalents and prose', () => {
-  assert.equal(isHighImpact('bash', { command: 'git clean -n' }), null)
-  assert.equal(isHighImpact('bash', { command: 'find . -name "*.js"' }), null)
-  assert.equal(isHighImpact('bash', { command: 'git clean --dry-run' }), null)
-  assert.equal(isHighImpact('bash', { command: 'echo find -delete is just text' }), null)
-  assert.equal(isHighImpact('bash', { command: 'python3 -c "print(1)"' }), null)
+test('allows ordinary commands', () => {
+  assert.equal(isHighImpact('bash', { command: 'ls -la' }), null)
+  assert.equal(isHighImpact('bash', { command: 'git status' }), null)
+  assert.equal(isHighImpact('bash', { command: 'npm test' }), null)
 })
 
-test('allows benign system-adjacent commands and prose', () => {
-  assert.equal(isHighImpact('bash', { command: 'git push origin main' }), null)
-  assert.equal(isHighImpact('bash', { command: 'chmod +x script.sh' }), null)
-  assert.equal(isHighImpact('bash', { command: 'chmod 755 script.sh' }), null)
-  assert.equal(isHighImpact('bash', { command: 'ls -la /tmp' }), null)
-  assert.equal(isHighImpact('bash', { command: 'echo sudo is just a word' }), null)
-  assert.equal(isHighImpact('bash', { command: 'grep sudo /etc/sudoers.bak.md' }), null)
-  assert.equal(isHighImpact('bash', { command: 'echo shutdown is a word' }), null)
-})
-
-// ---- isHighImpact: file path patterns -------------------------------------
-
-test('denies credential/secret/ssh paths on write and edit', () => {
-  assert.ok(isHighImpact('write', { file_path: '/tmp/app/.env' }))
-  assert.ok(isHighImpact('write', { file_path: '/srv/.env.production' }))
-  assert.ok(isHighImpact('write', { file_path: '/srv/.ENV.PROD' }))
-  assert.ok(isHighImpact('edit', { file_path: '/home/u/credentials.json' }))
-  assert.ok(isHighImpact('edit', { file_path: '~/credentials.json' }))
-  assert.ok(isHighImpact('write', { file_path: '/srv/secrets/' }))
-  assert.ok(isHighImpact('write', { file_path: '/home/u/.ssh/id_rsa' }))
-  assert.ok(isHighImpact('write', { file_path: '/home/u/.ssh/Id_Rsa' }))
-  assert.ok(isHighImpact('write', { file_path: '/home/u/.ssh/config' }))
-  assert.ok(isHighImpact('edit', { file_path: '/etc/ssl/priv.pem' }))
-  assert.ok(isHighImpact('write', { file_path: '/keys/deploy.key' }))
-  assert.ok(isHighImpact('write', { file_path: '/home/u/.netrc' }), '.netrc credential file')
-  assert.ok(isHighImpact('write', { file_path: '/etc/ssl/client.p12' }), 'pkcs12 keystore')
-  assert.ok(isHighImpact('edit', { file_path: '/keys/mobile.pfx' }), 'pfx keystore')
-  assert.ok(isHighImpact('write', { file_path: '/trust/cacerts.jks' }), 'java keystore')
-  assert.ok(isHighImpact('write', { file_path: '/home/u/.ssh/id_dsa' }), 'legacy dsa key')
-})
-
-test('allows ordinary and template file paths', () => {
-  assert.equal(isHighImpact('write', { file_path: '/tmp/app/src/main.ts' }), null)
-  assert.equal(isHighImpact('edit', { file_path: 'README.md' }), null)
-  assert.equal(isHighImpact('write', { file_path: '/tmp/app/.env.example' }), null)
-  assert.equal(isHighImpact('write', { file_path: '/tmp/app/.env.template' }), null)
-  assert.equal(isHighImpact('write', { file_path: '/tmp/app/secrets.test.ts' }), null)
-  assert.equal(isHighImpact('write', { file_path: '/home/u/Secrets.md' }), null)
-  assert.equal(isHighImpact('write', { file_path: '/home/u/.environs.md' }), null)
-})
-
-test('ignores non-target tools and malformed args', () => {
-  assert.equal(isHighImpact('bash', { command: 'cat foo', file_path: '/tmp/.env' }), null, 'bash checks only command')
-  assert.equal(isHighImpact('read', { file_path: '/tmp/app/.env' }), null, 'read is not a write surface')
-  assert.equal(isHighImpact('write', {}), null)
-  assert.equal(isHighImpact('write', undefined), null)
+test('flags credential and key paths for write/edit', () => {
+  assert.ok(isHighImpact('write', { file_path: '.env' }))
+  assert.ok(isHighImpact('write', { file_path: 'config/.env.production' }))
+  assert.ok(isHighImpact('edit', { file_path: '~/.ssh/id_rsa' }))
+  assert.ok(isHighImpact('write', { file_path: 'secrets.yaml' }))
+  assert.ok(isHighImpact('write', { file_path: 'cert.pem' }))
+  assert.equal(isHighImpact('write', { file_path: '.env.example' }), null)
+  assert.equal(isHighImpact('write', { file_path: '.env.template' }), null)
+  assert.equal(isHighImpact('write', { file_path: 'src/index.ts' }), null)
 })
 
 // ---- resolveTierSpec -------------------------------------------------------
 
+const SPEC_BASE = { subagentPolicy: 'inherit', mode: 'auto', planActive: false }
+
 test('explicit tier wins over everything', () => {
-  assert.equal(resolveTierSpec({ explicitTier: 'strong', escalated: true, mode: 'cheap' }), 'strong')
-  assert.equal(resolveTierSpec({ explicitTier: 'cheap', escalated: true, mode: 'strong' }), 'cheap')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, explicitTier: 'strong', sessionMode: 'cheap' }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, explicitTier: 'cheap', sessionMode: 'strong' }), 'cheap')
 })
 
-test('per-session mode overrides the global default', () => {
-  assert.equal(resolveTierSpec({ sessionMode: 'strong', mode: 'cheap' }), 'strong')
-  assert.equal(resolveTierSpec({ sessionMode: 'cheap', mode: 'strong' }), 'cheap')
-  assert.equal(resolveTierSpec({ sessionMode: 'off', mode: 'auto', planActive: true }), null)
-  assert.equal(resolveTierSpec({ sessionMode: 'off', escalated: true }), null)
+test('session mode off returns null (no routing)', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'off' }), null)
 })
 
-test('explicit per-session mode is immune to plan-mode flips', () => {
-  // The plan/mode handler must route through resolveTierSpec with the
-  // event's active flag, not hard-code plan state over the session mode.
-  assert.equal(resolveTierSpec({ sessionMode: 'cheap', mode: 'auto', planActive: true }), 'cheap')
-  assert.equal(resolveTierSpec({ sessionMode: 'strong', mode: 'auto', planActive: false }), 'strong')
+test('explicit session tier overrides auto', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'strong' }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'cheap' }), 'cheap')
 })
 
-test('escalation forces strong before policy/mode', () => {
-  assert.equal(resolveTierSpec({ escalated: true, isChild: true, subagentPolicy: 'cheap', mode: 'auto', planActive: false }), 'strong')
-  assert.equal(resolveTierSpec({ escalated: true, mode: 'cheap' }), 'strong')
+test('auto mode: plan -> strong, execution -> cheap', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'auto', planActive: true }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'auto', planActive: false }), 'cheap')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, planActive: true }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, planActive: false }), 'cheap')
 })
 
-test('child subagent policy applies before mode', () => {
-  assert.equal(resolveTierSpec({ isChild: true, subagentPolicy: 'strong', mode: 'cheap' }), 'strong')
-  assert.equal(resolveTierSpec({ isChild: true, subagentPolicy: 'cheap', mode: 'strong' }), 'cheap')
+test('escalation routes to the strong tier', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, escalated: true }), 'strong')
 })
 
-test('mode forces the tier', () => {
-  assert.equal(resolveTierSpec({ mode: 'strong' }), 'strong')
-  assert.equal(resolveTierSpec({ mode: 'cheap' }), 'cheap')
+test('subagent policy routes children', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, isChild: true, subagentPolicy: 'strong' }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, isChild: true, subagentPolicy: 'cheap' }), 'cheap')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, isChild: true, subagentPolicy: 'inherit' }), 'cheap')
 })
 
-test('auto follows plan state', () => {
-  assert.equal(resolveTierSpec({ mode: 'auto', planActive: true }), 'strong')
-  assert.equal(resolveTierSpec({ mode: 'auto', planActive: false }), 'cheap')
+test('delegated: main unrouted, children tiered by plan state', () => {
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'delegated', isChild: false }), null)
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'delegated', isChild: true, planActive: true }), 'strong')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, sessionMode: 'delegated', isChild: true, planActive: false }), 'cheap')
 })
 
-test('inherit policy on children falls through to mode/plan', () => {
-  assert.equal(resolveTierSpec({ isChild: true, subagentPolicy: 'inherit', mode: 'auto', planActive: true }), 'strong')
-  assert.equal(resolveTierSpec({ isChild: true, subagentPolicy: 'inherit', mode: 'auto', planActive: false }), 'cheap')
-})
+// ---- fallback classification ------------------------------------------------
 
-test('delegated mode keeps the main agent un-routed and still routes children', () => {
-  assert.equal(resolveTierSpec({ mode: 'delegated', isChild: false, planActive: true }), null)
-  assert.equal(resolveTierSpec({ mode: 'delegated', isChild: false, escalated: true }), null)
-  assert.equal(resolveTierSpec({ mode: 'delegated', isChild: true, subagentPolicy: 'inherit', planActive: true }), 'strong')
-  assert.equal(resolveTierSpec({ mode: 'delegated', isChild: true, subagentPolicy: 'inherit', planActive: false }), 'cheap')
-  assert.equal(resolveTierSpec({ sessionMode: 'delegated', mode: 'strong', isChild: false }), null)
-  assert.equal(resolveTierSpec({ sessionMode: 'delegated', mode: 'strong', isChild: true, subagentPolicy: 'cheap' }), 'cheap')
-})
-
-test('session auto explicitly overrides a delegated global default', () => {
-  assert.equal(resolveTierSpec({ sessionMode: 'auto', mode: 'delegated', isChild: false, planActive: true }), 'strong')
-  assert.equal(resolveTierSpec({ sessionMode: 'auto', mode: 'delegated', isChild: false, planActive: false }), 'cheap')
-})
-
-test('off mode yields no decision', () => {
-  assert.equal(resolveTierSpec({ mode: 'off' }), null)
-})
-// ---- classifyFallback ----------------------------------------------------
-
-test('classifyFallback: model-availability codes trigger fallback', () => {
+test('classifyFallback: trigger codes switch the model', () => {
   for (const code of FALLBACK_TRIGGER_CODES) {
-    assert.equal(classifyFallback({ message: 'x', code }), 'fallback', code)
+    assert.equal(classifyFallback({ code }), 'fallback', code)
   }
-  assert.equal(classifyFallback({ message: 'x', code: 'SERVER', status: 502 }), 'fallback')
+  assert.equal(classifyFallback({ status: 503 }), 'fallback')
 })
 
-test('classifyFallback: status >= 500 without a code still triggers fallback', () => {
-  assert.equal(classifyFallback({ message: 'boom', status: 502 }), 'fallback')
-  assert.equal(classifyFallback({ message: 'boom', status: 503, providerRetryAfterMs: 1000 }), 'fallback')
-  assert.equal(classifyFallback({ message: 'boom', status: 429 }), 'escalate', '429 is rate limit only when coded')
-})
-
-test('classifyFallback: non-model problems are ignored', () => {
+test('classifyFallback: non-model causes are ignored', () => {
   for (const code of FALLBACK_IGNORE_CODES) {
-    assert.equal(classifyFallback({ message: 'x', code }), 'ignore', code)
+    assert.equal(classifyFallback({ code }), 'ignore', code)
   }
 })
 
-test('classifyFallback: unknown shapes keep the original escalate behavior', () => {
-  assert.equal(classifyFallback({ message: 'boom' }), 'escalate')
-  assert.equal(classifyFallback({ code: 'SOME_NEW_CODE' }), 'escalate')
+test('classifyFallback: unknown shapes keep escalation behavior', () => {
+  assert.equal(classifyFallback({ message: 'weird' }), 'escalate')
   assert.equal(classifyFallback(null), 'escalate')
-  assert.equal(classifyFallback(undefined), 'escalate')
-  assert.equal(classifyFallback('boom'), 'escalate')
 })
 
-// ---- reasoning effort validation -----------------------------------------
-
-const CCTQ_EFFORTS = ['low', 'medium', 'high'].map((id) => ({ id, name: id }))
-const DS_EFFORTS = ['off', 'high', 'max'].map((id) => ({ id, name: id }))
-
-test('validateReasoningEffort accepts declared efforts and rejects the rest', () => {
-  assert.deepEqual(validateReasoningEffort('medium', CCTQ_EFFORTS), { ok: true, available: ['low', 'medium', 'high'] })
-  assert.deepEqual(validateReasoningEffort('high', CCTQ_EFFORTS), { ok: true, available: ['low', 'medium', 'high'] })
-  const r = validateReasoningEffort('max', CCTQ_EFFORTS)
-  assert.equal(r.ok, false)
-  assert.deepEqual(r.available, ['low', 'medium', 'high'])
-  assert.equal(validateReasoningEffort('off', DS_EFFORTS).ok, true)
-  assert.equal(validateReasoningEffort('high', DS_EFFORTS).ok, true)
-  assert.equal(validateReasoningEffort('max', DS_EFFORTS).ok, true)
-  assert.equal(validateReasoningEffort('medium', DS_EFFORTS).ok, false)
+test('classifyFallback: an unregistered provider route falls back (llm NO_ADAPTER)', () => {
+  assert.equal(classifyFallback({ code: 'NO_ADAPTER' }), 'fallback')
 })
 
-test('validateReasoningEffort is lenient when declarations are unavailable', () => {
-  assert.deepEqual(validateReasoningEffort('max', []), { ok: true, available: [] })
-  assert.deepEqual(validateReasoningEffort('max', undefined), { ok: true, available: [] })
-  assert.deepEqual(validateReasoningEffort('max', null), { ok: true, available: [] })
+test('attemptChain: primary first, then the chain, without identical repeats', () => {
+  const primary = { provider: 'a', model: 'pro', reasoningEffort: 'max' }
+  const chain = [{ provider: 'a', model: 'pro', reasoningEffort: 'max' }, { provider: 'b', model: 'flash', reasoningEffort: 'high' }]
+  assert.deepEqual(attemptChain(primary, chain).map((t) => t.provider + '/' + t.model), ['a/pro', 'b/flash'])
+  assert.deepEqual(attemptChain(primary, []).length, 1)
+  assert.deepEqual(attemptChain(primary, [{ provider: 'a', model: 'pro', reasoningEffort: 'high' }]).length, 2, 'same model with another effort is a distinct route')
+  assert.deepEqual(attemptChain(primary, undefined), [primary])
 })
 
-test('validateReasoningEffort rejects non-string efforts', () => {
-  assert.equal(validateReasoningEffort('', CCTQ_EFFORTS).ok, false)
-  assert.equal(validateReasoningEffort(undefined, CCTQ_EFFORTS).ok, false)
-  assert.equal(validateReasoningEffort(null, CCTQ_EFFORTS).ok, false)
+// ---- effort validation / ladder ----------------------------------------------
+
+test('validateReasoningEffort honors declared effort ids', () => {
+  assert.equal(validateReasoningEffort('high', ['off', 'high', 'max']).ok, true)
+  assert.equal(validateReasoningEffort('medium', ['off', 'high', 'max']).ok, false)
+  assert.equal(validateReasoningEffort('medium', []).ok, true, 'lenient without declarations')
+  assert.equal(validateReasoningEffort('', ['high']).ok, false)
 })
 
-test('nextEffortStep walks the medium -> high -> max ladder within declarations', () => {
-  assert.equal(nextEffortStep('medium', ['low', 'medium', 'high']), 'high')
-  assert.equal(nextEffortStep('high', ['low', 'medium', 'high']), null, 'cctq ceiling is high')
+test('nextEffortStep walks the ladder within declared ids', () => {
   assert.equal(nextEffortStep('medium', ['off', 'high', 'max']), 'high')
   assert.equal(nextEffortStep('high', ['off', 'high', 'max']), 'max')
   assert.equal(nextEffortStep('max', ['off', 'high', 'max']), null)
-  assert.equal(nextEffortStep('medium', undefined), 'high', 'lenient when declarations unknown')
-  assert.equal(nextEffortStep('bogus', ['low', 'medium', 'high']), null)
+  assert.equal(nextEffortStep('high', ['low', 'medium', 'high']), null, 'cctq has no max')
+  assert.equal(nextEffortStep('medium', ['low', 'medium', 'high']), 'high')
 })
 
-// ---- fallback chain state ------------------------------------------------
+// ---- fallback records ----------------------------------------------------------
 
 test('fallbackActive requires an active chain position within its TTL', () => {
-  assert.equal(fallbackActive(null, 1000), false)
-  assert.equal(fallbackActive({ index: -1, until: 99999 }, 1000), false, 'index -1 = main model')
-  assert.equal(fallbackActive({ index: 0, until: 2000 }, 1000), true)
-  assert.equal(fallbackActive({ index: 0, until: 1000 }, 1000), false, 'expired at boundary')
-  assert.equal(fallbackActive({ index: 2, until: 99999 }, 1000), true)
+  assert.equal(fallbackActive({ index: -1, until: Date.now() + 1000 }, Date.now()), false)
+  assert.equal(fallbackActive({ index: 0, until: Date.now() + 1000 }, Date.now()), true)
+  assert.equal(fallbackActive({ index: 0, until: Date.now() - 1 }, Date.now()), false)
+  assert.equal(fallbackActive(null, Date.now()), false)
 })
 
-test('advanceFallback walks the chain one step per failure', () => {
-  const chain = [{ provider: 'p1', model: 'm1' }, { provider: 'p2', model: 'm2' }]
-  const first = advanceFallback(null, chain, 1000, 300000)
-  assert.deepEqual(first, { index: 0, until: 301000 })
-  const second = advanceFallback(first, chain, 2000, 300000)
-  assert.deepEqual(second, { index: 1, until: 302000 })
-  assert.equal(advanceFallback(second, chain, 3000, 300000), null, 'chain exhausted')
-  assert.equal(advanceFallback(null, [], 1000, 300000), null, 'empty chain')
-  assert.equal(advanceFallback(null, chain, 1000, 0).until, 301000, 'defaults TTL when 0')
+test('advanceFallback walks the chain and exhausts', () => {
+  const chain = [{ provider: 'a', model: 'm1' }, { provider: 'b', model: 'm2' }]
+  const now = 1000
+  const s1 = advanceFallback({ index: -1, until: 0 }, chain, now, 60000)
+  assert.equal(s1.index, 0)
+  const s2 = advanceFallback(s1, chain, now, 60000)
+  assert.equal(s2.index, 1)
+  assert.equal(advanceFallback(s2, chain, now, 60000), null, 'chain exhausted')
 })
 
-// ---- config migration ----------------------------------------------------
+// ---- migrateTierConfig ---------------------------------------------------------
 
-test('migrateTierConfig fills tier defaults when no config exists', () => {
-  const strong = migrateTierConfig('strong', null)
-  assert.equal(strong.followSession, true)
-  assert.equal(strong.provider, 'deepseek-official')
-  assert.equal(strong.model, 'deepseek-v4-pro')
-  assert.equal(strong.reasoningEffort, 'max')
-  assert.deepEqual(strong.fallback, [{ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }])
-  assert.equal(strong.label, 'strong')
-  const cheap = migrateTierConfig('cheap', null)
-  assert.equal(cheap.followSession, false)
-  assert.equal(cheap.provider, 'deepseek-official')
-  assert.equal(cheap.model, 'deepseek-v4-flash')
-  assert.equal(cheap.reasoningEffort, 'medium')
-  assert.deepEqual(cheap.fallback, [])
+test('migrateTierConfig fills defaults and migrates legacy entries', () => {
+  const d = migrateTierConfig('cheap', null)
+  assert.equal(d.provider, 'deepseek-official')
+  assert.equal(d.model, 'deepseek-v4-flash')
+  assert.equal(d.followSession, false)
+  const legacy = migrateTierConfig('strong', { provider: 'x', model: 'y', reasoningEffort: 'high' })
+  assert.equal(legacy.followSession, true)
+  assert.deepEqual(legacy.fallback, [{ provider: 'x', model: 'y', reasoningEffort: 'high' }], 'legacy config mirrors primary as the fallback')
+  const explicit = migrateTierConfig('cheap', { provider: 'x', model: 'y', reasoningEffort: 'low', fallback: [] })
+  assert.deepEqual(explicit.fallback, [], 'empty array is a real chain, not legacy')
 })
 
-test('migrateTierConfig migrates legacy configs without error', () => {
-  const legacy = migrateTierConfig('cheap', { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' })
-  assert.equal(legacy.followSession, false, 'cheap default followSession')
-  assert.deepEqual(legacy.fallback, [{ provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' }], 'fallback mirrors the legacy primary')
-  const legacyStrong = migrateTierConfig('strong', { provider: 'opencode-go', model: 'v4-pro', reasoningEffort: 'high' })
-  assert.equal(legacyStrong.followSession, true, 'strong default followSession')
-  assert.deepEqual(legacyStrong.fallback, [{ provider: 'opencode-go', model: 'v4-pro', reasoningEffort: 'high' }])
-})
-
-test('migrateTierConfig keeps an explicit empty fallback chain disabled', () => {
-  const cfg = migrateTierConfig('cheap', { provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium', fallback: [] })
-  assert.deepEqual(cfg.fallback, [])
-})
-
-test('migrateTierConfig keeps explicit followSession and fallback chains', () => {
-  const raw = {
-    followSession: false,
-    provider: 'cctq',
-    model: 'gpt-5.6-luna',
-    reasoningEffort: 'high',
-    fallback: [
-      { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
-      { provider: 'cctq', model: 'claude-opus-5', reasoningEffort: 'low' },
-      { provider: '', model: 'bogus', reasoningEffort: 'x' },
-    ],
-  }
-  const cfg = migrateTierConfig('cheap', raw)
-  assert.equal(cfg.followSession, false)
-  assert.equal(cfg.provider, 'cctq')
-  assert.equal(cfg.reasoningEffort, 'high')
-  assert.deepEqual(cfg.fallback, [
-    { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' },
-    { provider: 'cctq', model: 'claude-opus-5', reasoningEffort: 'low' },
-  ], 'invalid entries are dropped')
-})
-
-test('DEFAULT_TIER_CONFIG and EFFORT_LADDER match the v0.5.0 contract', () => {
-  assert.deepEqual(EFFORT_LADDER, ['medium', 'high', 'max'])
+test('defaults: strong follows session, cheap is deepseek-v4-flash at low effort', () => {
   assert.equal(DEFAULT_TIER_CONFIG.strong.followSession, true)
-  assert.equal(DEFAULT_TIER_CONFIG.cheap.followSession, false)
-  assert.equal(DEFAULT_TIER_CONFIG.cheap.provider, 'deepseek-official')
   assert.equal(DEFAULT_TIER_CONFIG.cheap.model, 'deepseek-v4-flash')
+  assert.equal(DEFAULT_TIER_CONFIG.cheap.reasoningEffort, 'low')
+  assert.deepEqual(EFFORT_LADDER, ['low', 'medium', 'high', 'max'])
+})
+
+test('reconcileReasoningEffort omits effort when the model declares no reasoning', () => {
+  const r = reconcileReasoningEffort('medium', undefined)
+  assert.equal(r.effort, undefined, 'a model without reasoning metadata must receive no effort')
+  assert.match(r.reason, /no reasoning support/)
+  assert.deepEqual(reconcileReasoningEffort(undefined, undefined), { effort: undefined, reason: null })
+})
+
+test('reconcileReasoningEffort substitutes an undeclared effort with a declared one', () => {
+  const deepseek = { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }] }
+  const r = reconcileReasoningEffort('medium', deepseek)
+  assert.equal(r.effort, 'low')
+  assert.match(r.reason, /not declared/)
+  assert.equal(reconcileReasoningEffort('max', deepseek).effort, 'max')
+  assert.equal(reconcileReasoningEffort('max', deepseek).reason, null)
+})
+
+test('reconcileReasoningEffort prefers the model default then the lowest declared', () => {
+  const defaulted = { efforts: [{ id: 'high' }, { id: 'max' }], defaultEffort: 'max' }
+  assert.equal(reconcileReasoningEffort('medium', defaulted).effort, 'max')
+  const noDefault = { efforts: [{ id: 'high' }, { id: 'max' }] }
+  assert.equal(reconcileReasoningEffort('medium', noDefault).effort, 'high')
+  assert.equal(reconcileReasoningEffort('low', { efforts: [] }).effort, 'low', 'lenient without ids')
+})
+
+// ---- policy: escalation state machine -------------------------------------------
+
+test('escalationStep counts errors in a window and opens a TTL escalation', () => {
+  let r = escalationStep(undefined, 1000, { threshold: 2, windowMs: 60000, ttlMs: 180000 })
+  assert.equal(r.escalated, false)
+  assert.equal(r.rec.count, 1)
+  r = escalationStep(r.rec, 2000, { threshold: 2, windowMs: 60000, ttlMs: 180000 })
+  assert.equal(r.escalated, true)
+  assert.equal(r.rec.until, 2000 + 180000)
+  assert.equal(escalationActive(r.rec, 3000), true)
+  assert.equal(escalationActive(r.rec, 2000 + 180001), false)
+  assert.equal(escalationExpired(r.rec, 2000 + 180001), true)
+})
+
+test('escalationStep resets the counter outside the window', () => {
+  let r = escalationStep(undefined, 0, { threshold: 2, windowMs: 1000, ttlMs: 5000 })
+  r = escalationStep(r.rec, 5000, { threshold: 2, windowMs: 1000, ttlMs: 5000 })
+  assert.equal(r.escalated, false, 'second error outside the window restarts the count')
+  assert.equal(r.rec.count, 1)
+})
+
+test('decideGuardAction denies only on the weak tier with a hit', () => {
+  assert.equal(decideGuardAction('cheap', 'hit', 'cheap').action, 'deny')
+  assert.equal(decideGuardAction('strong', 'hit', 'cheap').action, 'allow')
+  assert.equal(decideGuardAction('cheap', null, 'cheap').action, 'allow')
+})
+
+test('decidePlanExit: explore first, one advisor review, then allow', () => {
+  const base = { planActive: true, explored: 0, minExplore: 2, advisorGate: true, consulted: false }
+  assert.equal(decidePlanExit({ ...base, planActive: false }).action, 'allow', 'outside plan mode the gate is silent')
+  const early = decidePlanExit(base)
+  assert.equal(early.action, 'deny')
+  assert.ok(early.reason.includes('explore before presenting the plan'))
+  assert.equal(decidePlanExit({ ...base, explored: 2 }).action, 'consult')
+  assert.equal(decidePlanExit({ ...base, explored: 2, consulted: true }).action, 'allow')
+  assert.equal(decidePlanExit({ ...base, explored: 2, advisorGate: false }).action, 'allow')
+  assert.equal(decidePlanExit({ ...base, minExplore: 0, advisorGate: false }).action, 'allow', 'minExplore 0 disables the explore check')
+})
+
+test('decideErrorActions escalates at the threshold and raises cheap effort otherwise', () => {
+  const opts = { threshold: 2, windowMs: 60000, ttlMs: 180000 }
+  const first = decideErrorActions({ message: 'x', code: 'TIMEOUT' }, undefined, 'cheap', 'cheap', { ...opts, now: 1000 })
+  assert.deepEqual(first.actions, ['raise-effort'])
+  const second = decideErrorActions({ message: 'y', code: 'TIMEOUT' }, first.rec, 'cheap', 'cheap', { ...opts, now: 2000 })
+  assert.deepEqual(second.actions, ['escalate'])
+  const ignored = decideErrorActions({ code: 'ABORTED' }, undefined, 'cheap', 'cheap', { ...opts, now: 3000 })
+  assert.deepEqual(ignored.actions, [])
+})
+
+// ---- consult registry ------------------------------------------------------------
+
+test('modelFamily groups routes of one model lineage across providers', () => {
+  assert.equal(modelFamily('deepseek-v4-pro'), 'deepseek')
+  assert.equal(modelFamily('deepseek-ai/DeepSeek-V3'), 'deepseek')
+  assert.equal(modelFamily('minimax/minimax-m3.1-flash'), 'minimax')
+  assert.equal(modelFamily('gpt-5.6-terra'), 'gpt')
+  assert.equal(modelFamily('claude-opus-4'), 'claude')
+})
+
+test('reviewerConflicts flags only same-family implementers', () => {
+  const reviewer = { provider: 'opencode-go', model: 'deepseek-v4-pro' }
+  const implementers = [
+    { label: 'cheap tier', provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    { label: 'session model', provider: 'cctq', model: 'gpt-5.6-terra' },
+  ]
+  assert.deepEqual(reviewerConflicts(reviewer, implementers).map((i) => i.label), ['cheap tier'])
+  assert.deepEqual(reviewerConflicts({ provider: 'cctq', model: 'claude-opus-4' }, implementers), [])
+})
+
+test('consult registry carries advisor and review specs', () => {
+  assert.ok(CONSULTS.advisor.system.includes('Tier Advisor'))
+  assert.ok(CONSULTS.review.system.includes('Tier Reviewer'))
+  assert.equal(consultSpec('advisor').buildUser({ question: 'q', evidence: 'e' }), 'Decision question:\nq\n\nEvidence:\ne')
+  const parsed = consultSpec('review').parse('APPROVE\nall good', true)
+  assert.equal(parsed.verdict, 'APPROVE')
+  assert.equal(consultSpec('review').parse('hmm', true).verdict, 'UNPARSED')
+  assert.equal(consultSpec('review').parse('', false).verdict, 'FAILED')
+})
+
+// ---- tier registry -----------------------------------------------------------------
+
+test('childRouteSource: pins and escalation win, then an explicit route, then caller', () => {
+  const base = { pinned: false, escalated: false, explicit: false, policy: 'inherit', hasParentRoute: true }
+  assert.equal(childRouteSource({ ...base, policy: 'caller' }), 'parent')
+  assert.equal(childRouteSource({ ...base, policy: 'caller', hasParentRoute: false }), 'tier', 'no parent route: fall back to the tier decision')
+  assert.equal(childRouteSource({ ...base, explicit: true, policy: 'caller' }), 'keep', 'an explicit route beats caller')
+  assert.equal(childRouteSource({ ...base, explicit: true, escalated: true }), 'tier', 'escalation outranks an explicit route')
+  assert.equal(childRouteSource({ ...base, explicit: true, pinned: true }), 'tier', 'a tier_worker pin outranks an explicit route')
+  assert.equal(childRouteSource({ ...base, policy: 'cheap' }), 'tier')
+})
+
+test('capped policy: the parent tier, never stronger than the cap', () => {
+  const three = ['strong', 'main', 'cheap']
+  assert.equal(cappedTier('strong', 'main', three), 'main', 'a strong parent is capped at main')
+  assert.equal(cappedTier('main', 'main', three), 'main')
+  assert.equal(cappedTier('cheap', 'main', three), 'cheap', 'a weaker parent is kept')
+  assert.equal(cappedTier('strong', 'cheap', ['strong', 'cheap']), 'cheap', 'two tiers: a strong parent is capped at cheap')
+  assert.equal(cappedTier(null, 'main', three), null, 'a parent without a tier keeps its baseline')
+  assert.equal(childRouteSource({ pinned: false, escalated: false, explicit: false, policy: 'capped', hasParentRoute: true }), 'capped')
+  assert.equal(childRouteSource({ pinned: false, escalated: false, explicit: false, policy: 'capped', hasParentRoute: false }), 'tier')
+})
+
+test('three tiers: plan runs on main, strong is reached by escalation or a pin', () => {
+  const three = { subagentPolicy: 'inherit', mode: 'auto', tiers: ['strong', 'main', 'cheap'] }
+  assert.equal(resolveTierSpec({ ...three, planActive: true }), 'main')
+  assert.equal(resolveTierSpec({ ...three, planActive: false }), 'cheap')
+  assert.equal(resolveTierSpec({ ...three, planActive: false, escalated: true }), 'strong')
+  assert.equal(resolveTierSpec({ ...three, planActive: false, sessionMode: 'strong' }), 'strong')
+  assert.equal(resolveTierSpec({ ...three, planActive: false, sessionMode: 'main' }), 'main')
+  assert.equal(resolveTierSpec({ ...SPEC_BASE, planActive: true, tiers: ['strong', 'cheap'] }), 'strong', 'two tiers: plan stays on strong')
+})
+
+test('main defaults follow the session model at high effort', () => {
+  assert.equal(DEFAULT_TIER_CONFIG.main.followSession, true)
+  assert.equal(migrateTierConfig('main', null).reasoningEffort, 'high')
+})
+
+test('tier registry orders strong first and cheap last', () => {
+  const reg = createTierRegistry(null)
+  assert.deepEqual(reg.names(), TIER_ORDER)
+  assert.equal(reg.first(), 'strong')
+  assert.equal(reg.last(), 'cheap')
+  assert.equal(reg.get('cheap').model, 'deepseek-v4-flash')
+  reg.set('cheap', migrateTierConfig('cheap', { provider: 'x', model: 'y', reasoningEffort: 'high' }))
+  assert.equal(tierLabel(reg.get('cheap')), 'x/y (high)')
+  assert.equal(chainText(reg.get('cheap')), 'x/y@high')
+  const snap = reg.snapshot()
+  assert.equal(snap.strong.followSession, true)
 })

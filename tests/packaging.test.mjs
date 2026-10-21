@@ -1,6 +1,4 @@
-// Packaging regression tests: protect other users from install-breaking
-// mistakes (e.g. a comment-only cordis.patch.yml that makes every dsh boot
-// exit immediately, or a missing shipped preset).
+// Packaging / manifest integrity checks for dsh-tier-router.
 // Run with: node --test tests/
 
 import { test } from 'node:test'
@@ -10,39 +8,73 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+const patch = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
 
-test('cordis.patch.yml is a top-level YAML array (never comment-only)', () => {
-  const text = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
-  const first = text.split('\n').find((line) => line.trim() !== '' && !line.trim().startsWith('#'))
-  assert.ok(first !== undefined, 'patch file has a non-comment line')
-  assert.ok(first.trim() === '[]' || first.trim().startsWith('- '), 'first entry is an array marker: ' + first)
-})
-
-test('cordis.patch.yml installs the host preset synchronizer only', () => {
-  const text = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
-  const code = text.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n')
-  assert.ok(code.includes('- id: tier-preset-discovery'), 'ships a host discovery row')
-  assert.ok(code.includes('name: dsh-tier-router'), 'host row loads this package')
-  assert.ok(code.includes('hostPresetSync: true'), 'host row is explicitly sync-only')
-  assert.ok(!code.includes('- id: tier-routing'), 'agent routing remains preset-scoped')
-})
-
-test('shipped agent-presets/tiered preset contains the tier-routing row', () => {
-  const dir = join(ROOT, 'agent-presets', 'tiered')
-  assert.ok(existsSync(join(dir, 'agent.cordis.yml')), 'agent.cordis.yml exists')
-  assert.ok(existsSync(join(dir, 'preset.yml')), 'preset.yml exists')
-  const comp = readFileSync(join(dir, 'agent.cordis.yml'), 'utf8')
-  assert.ok(comp.includes('- id: tier-routing'), 'tier-routing row present')
-  assert.ok(comp.includes('name: dsh-tier-router'), 'tier-routing row names the package')
-  const meta = readFileSync(join(dir, 'preset.yml'), 'utf8')
-  assert.ok(meta.includes('name:'), 'preset.yml has a name')
-  assert.ok(meta.includes('description:'), 'preset.yml has a description')
-})
-
-test('package.json ships lib, patch, and the preset in files', () => {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+test('package entry and exports are consistent', () => {
+  assert.equal(pkg.type, 'module')
+  assert.equal(pkg.main, './lib/index.js')
+  assert.equal(pkg.exports['.'], './lib/index.js')
+  assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
   assert.ok(pkg.files.includes('lib'))
   assert.ok(pkg.files.includes('cordis.patch.yml'))
-  assert.ok(pkg.files.includes('agent-presets'))
-  assert.ok(pkg.type === 'module')
+  for (const f of pkg.files.concat([pkg.main])) {
+    const p = join(ROOT, f)
+    assert.ok(existsSync(p), 'missing packaged path: ' + f)
+  }
+  // Browser half: the Plugins-page settings card over the `tier-routing`
+  // namespace (settings UI is NOT auto-generated in this Desktop build).
+  assert.equal(pkg.exports['./client'], './client/client.js')
+  assert.ok(pkg.files.includes('client'), 'client/ bundle is packaged')
+  assert.equal(pkg.dsh.client.platform, 'web')
+  for (const dep of [
+    '@deepseek-ai/dsh-client-locale',
+    '@deepseek-ai/dsh-client-ui-settings',
+    '@deepseek-ai/dsh-client-ui-plugin-manager',
+  ]) {
+    assert.ok(pkg.dsh.client.inject.includes(dep), 'client inject misses ' + dep)
+  }
+  assert.ok(!pkg.files.includes('agent-presets'), 'no agent-presets/ bundle')
+})
+
+test('cordis.patch declares the host entry plus the tiered preset composition', () => {
+  // Host-plane row: volatile config lives on the profile entry so SettingsForms
+  // can render and persist it.
+  assert.match(patch, /id:\s*tier-routing[\s\S]*?name:\s*dsh-tier-router/)
+  // Agent-plane preset declaration.
+  assert.match(patch, /id:\s*preset-tiered/)
+  assert.match(patch, /name:\s*'@deepseek-ai\/dsh-agent-preset'/)
+  assert.match(patch, /id:\s*tiered/)
+  // The agent-plane router row inside the preset plugin list.
+  assert.match(patch, /id:\s*tier-routing-agent/)
+  assert.match(patch, /plane:\s*agent/)
+  // Standard preset composition is present (spot-check critical plugins).
+  for (const name of ['dsh-plan-mode', 'dsh-tool-subagent', 'dsh-tool-bash', 'dsh-tool-ask-user', 'dsh-workflow-ptc', 'dsh-compaction-basic', 'dsh-persona']) {
+    assert.match(patch, new RegExp("name: '@deepseek-ai/" + name + "'"), 'preset misses ' + name)
+  }
+})
+
+test('client bundle follows the ModuleLoader/slot contract', () => {
+  const src = readFileSync(join(ROOT, 'client', 'client.js'), 'utf8')
+  assert.match(src, /__ModuleLoader__\.load/)
+  assert.match(src, /SETTINGS_NS\s*=\s*'tier-routing'/)
+  assert.match(src, /configForms\.get\(SETTINGS_NS\)/)
+  // The Plugins page renders a bundle's own configuration in
+  // `plugins.bundle.config` and a row's page in `plugins.row.config`;
+  // `plugins.item` is reserved for the shipped official settings pages.
+  assert.match(src, /'plugins\.bundle\.config'/)
+  assert.match(src, /'plugins\.row\.config'/)
+  assert.match(src, /dsh-tier-router#/)
+  assert.match(src, /'shell\.overlay'/)
+  assert.match(src, /command\/executed/)
+  assert.match(src, /remote\.session\.modelCatalog\(\)/)
+  assert.ok(!/remote\.llm|llm\.listModels/.test(src), 'model lists come from the session catalog the picker uses')
+  assert.match(src, /llm\/adapters-updated/)
+  assert.match(src, /settings\/document-updated/)
+  assert.ok(!/'plugins\.item'/.test(src), 'plugins.item belongs to the shipped official pages')
+})
+
+test('legacy packaging artifacts are gone', () => {
+  assert.ok(!existsSync(join(ROOT, 'lib', 'preset-sync.js')))
+  assert.ok(!existsSync(join(ROOT, 'agent-presets')))
 })

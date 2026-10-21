@@ -20,23 +20,16 @@ jobs:
       # newly published harness versions crashed arborist, hit ERESOLVE, or
       # produced false "up to date" no-ops on npm 10.
       - run: npm install --no-audit --no-fund
-      - run: node --check lib/index.js
-      - run: node --check lib/pure.js
-      - run: node --check lib/preset-sync.js
-      # The WebUI client is hand-authored CJS for the ModuleLoader; syntax
-      # check it so a future edit cannot ship a broken bundle.
-      - run: node --check client/client.js
+      - run: npm run check
       - run: node --test "tests/**/*.test.mjs"
       # Packaging regression: the published tarball must keep every runtime
-      # surface (lib, the agent-plane preset, the WebUI client, the patch).
+      # surface (lib tree, the patch manifest, docs).
       - run: |
           PACKED=$(npm pack --dry-run --json)
           for path in \
-            "lib/index.js" "lib/pure.js" "lib/preset-sync.js" \
-            "client/client.js" "cordis.patch.yml" \
-            "agent-presets/tiered/agent.cordis.yml" \
-            "agent-presets/tiered/preset.yml" \
-            "CHANGELOG.md" "LICENSE" "README.md"; do
+            "lib/index.js" "lib/core/guard.js" "lib/core/routing.js" \
+            "lib/dsh/services.js" "lib/dsh/routing-seam.js" \
+            "cordis.patch.yml" "CHANGELOG.md" "LICENSE" "README.md"; do
             echo "$PACKED" | grep -q "\"path\": \"$path\"" || { echo "missing from tarball: $path"; exit 1; }
           done
           echo "tarball contains all required files"

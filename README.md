@@ -16,21 +16,27 @@ English · [中文](README.zh.md)
 
 ```mermaid
 flowchart LR
-    subgraph main["Main session (header-driven)"]
+    subgraph main["Every agent (agent/request waterfall)"]
       U["User message"] --> IN["agent/inbox/inserted"]
-      IN -->|"auto mode"| HW["write session request/header"]
-      PM["plan/mode flip"] --> HW
-      HW --> API["api-proxy selection layer"]
-      API --> STEP["each step's model = header tier"]
+      STEP0["each model request"] --> AR["agent/request waterfall"]
+      IN --> AR
+      PM["plan/mode flip"] --> AR
+      AR -->|"return config per tier (provider/model/effort)"| STEP["step runs on the tier's model"]
     end
-    subgraph child["Subagents (agent/request swap)"]
+    subgraph child["Subagents (startActivation + same waterfall)"]
       W["tier_worker dispatch"] -->|"agentOptions injection"| C["subagent"]
-      C --> AR["agent/request waterfall"]
-      AR -->|"swap provider/model per tier"| STEP2["subagent steps"]
+      C --> AR
     end
     G["tools/pre-execute guard"] -.->|"cheap tier + high-impact pattern"| DENY["deny + escalation hint"]
     E["agent/error failures"] -.->|"within window"| ESC["temporary strong tier (TTL)"]
+    FE["agent/request-error"] -.->|"model-availability failure"| FB["next fallback-chain entry + retry"]
 ```
+
+The waterfall seam returns the routed `LlmCallConfig` for **every** request, so
+tier switches apply to the current step (no one-step delay) and the loop itself
+writes the `request/header` log entries. On older runtimes without the
+waterfall, a header-write fallback strategy (`applyHeaderRoute`) reproduces the
+pre-0.2 behavior.
 
 ```mermaid
 sequenceDiagram
@@ -70,15 +76,26 @@ sequenceDiagram
 - **Failure auto-escalation**: repeated step errors within a window (default 2 errors /
   60s) temporarily escalate the session to the strong tier (default 180s), expiring via
   TTL; sessions in `off` mode never escalate.
-- **Configurable tiers (durable)**: `/tier set <strong|cheap> <provider> <model> [effort]` or the
-  `tier_configure` tool can point either tier at any registered provider/model, configure
-  the strong tier to follow the session selection, and set ordered fallback chains.
-  Configuration persists in the `tier-router` settings namespace and survives restarts
-  (pass `sessionOnly: true` for a transient change).
-- **WebUI settings**: the Tier routing settings page configures providers, models,
-  reasoning effort, follow-session behavior, fallback chains, routing mode, and the
-  subagent policy. It uses the live model catalog when available and preserves custom
-  routes when it is not.
+- **Configurable tiers (durable)**: `/tier set <strong|main|cheap> <provider> <model> [effort]` or the
+  `tier_configure` tool can point each tier at any registered provider/model, configure
+  the strong and main tiers to follow the session selection, and set ordered fallback chains.
+- **Two independent switches**: `/tier layout <two|three>` (three adds a `main` tier: plan mode runs
+  on main, execution on cheap, and strong becomes the escalation tier; two is the default), and
+  `/tier roles <on|off>` (advisor and reviewer get their own models via `/tier set advisor|reviewer`;
+  off, they use the strong route). A role has no fallback chain of its own and falls back to the
+  strong chain. The review verdict warns in `/tier status` when the reviewer shares a model family
+  with an implementer.
+  Configuration persists on the host-level `tier-routing` profile entry and survives
+  restarts (pass `sessionOnly: true` for a transient change).
+- **WebUI settings**: every volatile field of the host `tier-routing` entry (mode,
+  providers, models, reasoning effort, follow-session, fallback chains, subagent policy)
+  appears on the plugin's auto-generated settings page in the DSH WebUI and persists
+  through the profile patch — no hand-edited files. The former hand-built
+  `client/client.js` settings card was removed in favor of this mechanism.
+- **Seam self-diagnostics**: at startup the plugin probes every DSH service and event
+  it uses; `/tier status` reports the active routing strategy (`waterfall`/`header`) and
+  any missing capability. A missing seam degrades only the feature that needs it —
+  the plugin itself keeps loading.
 - **Per-tier fallback chains**: if the primary
   model is unavailable (unknown model, quota, rate limit, missing/invalid credential,
   server/transport error, or any status >= 500 failure), the router changes route at the
@@ -88,17 +105,20 @@ sequenceDiagram
   crosses from a cheap chain to a strong chain during a plan transition.
 - **Task-intensity reasoning effort**: the strong tier follows your session model
   selection by default (`/tier set strong follow-session`); the cheap tier starts at
-  `medium` and raises itself to `high`/`max` (bounded by the model's declared efforts,
-  e.g. deepseek models declare off/high/max) on cheap-tier retry errors, high-impact guard
-  denials, or the `tier_escalate_effort` tool; `/tier effort <medium|high|max>` sets it
-  manually. `tier_configure` and `/tier set` validate every effort against
-  `llm.resolveModelInfo` when metadata is available.
+  `low` and raises itself through `medium`/`high`/`max` (bounded by the model's declared
+  efforts) on cheap-tier retry errors, high-impact guard denials, or the
+  `tier_escalate_effort` tool; `/tier effort <low|medium|high|max>` sets it manually.
+  `tier_configure` and `/tier set` validate every effort against `llm.resolveModelInfo`,
+  and the routing seam fits each request to the route's declaration before dispatch: an
+  undeclared level is substituted, and a model that declares no reasoning support (many
+  OpenRouter routes) receives no `reasoningEffort` at all, so a request never fails with
+  `UNSUPPORTED_REASONING_EFFORT`.
 
   (pass `sessionOnly: true` for a transient change).
 - **High-impact escalation gate (deterministic guard)**: while the cheap tier executes,
   `tools/pre-execute` denies high-impact tool calls and requires switching to the strong
   tier first — no reliance on model self-discipline. Guard rules (pure logic in
-  `lib/pure.js`, unit-tested):
+  `lib/core/guard.js`, unit-tested):
   - every `rm -rf` spelling: combined flags (`-rf`), split flags (`-r -f`), case variants
     (`-R`), long flags (`--recursive --force`), runner prefixes (`sudo rm -rf`, `busybox rm`);
   - destructive commands: `mkfs`, `dd if=`, `sudo`, `shutdown/reboot/halt`,
@@ -111,9 +131,11 @@ sequenceDiagram
   - prose never false-positives: `echo rm -rf`, `grep sudo` do not trigger
     (command-position anchored).
 - **Subagent tiering**: `tier_worker` dispatches bounded task packets to a fresh subagent
-  on a chosen tier (`agentOptions` model injection), with `outputSchema` (structured
-  results), `toolFilter` (restrict worker tools), `maxDepth` (delegation-depth cap),
-  `persona` (per-child persona) and `background` (run via the jobs service).
+  on a chosen tier (`agentOptions` model injection via `subagents.startActivation`),
+  with `outputSchema` (structured results), `agentPreset` (compose the worker on a
+  different preset — replaces the retired `persona`/`toolFilter` options, which DSH
+  0.2 removed from the subagent contract), `maxDepth` (delegation-depth cap) and
+  `background` (run via the jobs service, owned by the session id).
   `/tier subagent <inherit|cheap|strong>` also routes ordinary `subagent` and
   `subagent_fork` children before their first request; an automatic escalation remains
   temporary and never permanently overrides an explicitly selected worker tier.
@@ -123,33 +145,31 @@ sequenceDiagram
 
 ## Installation
 
-> **Plane note.** `dsh-tier-router` routing remains **agent-plane**: tools,
-> slash commands, prompt sections, and routing listeners mount only when a
-> session uses `tiered`. Its profile bundle now has one host-only responsibility:
-> synchronize the packaged `tiered` preset into DSH's discovery root on startup.
+> **Plane note.** The bundle has two rows: a **host-plane** `tier-routing` entry
+> that owns the durable tier configuration (edited from the Plugins page — the
+> bundled `client/` browser module registers a "Tier routing" settings card on
+> the plugin's entry, backed by the same host settings namespace),
+> and an **agent-plane** `tier-routing-agent` row inside the bundled `tiered`
+> agent preset. Tools, commands and routing listeners mount only for sessions
+> on that preset; the preset is declared through `@deepseek-ai/dsh-agent-preset`,
+> so no file copying into `~/.dsh/.agent-presets` is needed or possible (DSH 0.2
+> no longer scans that directory).
 
 ```sh
-# 1. Install into the profile. The host bundle synchronizes the packaged
-#    tiered preset into ~/.dsh/.agent-presets on the next DSH startup.
+# 1. Install into the profile.
 dsh plugin --profile web add dsh-tier-router
 
 # Local development uses the same installation path:
 dsh plugin --profile web add .
 
-# 2. Restart DSH, then choose "tiered" in the preset picker
-#    for a new session (or make it the profile default through agent-presets).
-#    No manual preset copy is required.
+# 2. Restart DSH, then choose "tiered" in the preset picker for a new session
+#    (or make it the profile default). Configure on the Plugins page: the
+#    dsh-tier-router card expands into the "Tier routing" form once a session
+#    on the tiered preset has run (the settings namespace is host-served).
 ```
 
-Uninstall: run `dsh plugin --profile web remove dsh-tier-router`; the next DSH
-startup no longer updates the `tiered` preset. Delete
-`~/.dsh/.agent-presets/tiered` separately only when it is no longer wanted.
-
-Installation is verified in practice: the package resolves from the profile
-store, the shipped `agent-presets/tiered` preset (a `standard` copy plus the
-`- id: tier-routing / name: dsh-tier-router` row) passes
-`agentPresets.standingKeyFor` mount validation, module loading is smoke-tested,
-and `npm pack` ships a clean tarball (lib + patch + preset + README/LICENSE).
+Uninstall: `dsh plugin --profile web remove dsh-tier-router` removes both the
+host entry and the `tiered` preset on the next startup.
 
 ### Post-install acceptance checklist
 
@@ -158,15 +178,17 @@ and `npm pack` ships a clean tarball (lib + patch + preset + README/LICENSE).
 2. **Open a NEW session** — existing sessions keep the preset they were created
    with (this is by design).
 3. Run `/tier status` — it must report:
-   - `config persisted: yes (tier-router settings namespace)`,
+   - `config persisted: yes (host entry "tier-routing", writable)`,
+   - `routing seam: waterfall` and `seams: all ok`,
    - both tiers with their provider/model/effort,
-   - a non-empty `diag:` line with live counters.
+   - a `diag:` line with live counters.
 4. The `tier_status`, `tier_route`, `tier_configure`, `tier_advisor`,
    `tier_review`, and `tier_worker` tools must be callable in that session.
 5. While executing on the cheap tier, a high-impact command (e.g. `rm -rf`,
    `sudo …`) must be denied by the guard with an escalation hint.
-6. `/tier set strong <provider> <model> [effort]` must reply `Saved to
-   tier-router settings.` and survive a restart.
+6. `/tier set strong <provider> <model> [effort]` must reply
+   `Saved to the tier-routing profile entry` and survive a restart; the same
+   value appears on the plugin's generated settings page.
 
 If `/tier status` is unavailable, the row is missing from the session's preset
 (see Installation) or the session predates the preset switch.
@@ -184,8 +206,14 @@ If `/tier status` is unavailable, the row is missing from the session's preset
 /tier off                                   # disable routing for this session, restore its default model (other sessions unaffected)
 /tier plan                                  # auto + enter plan mode, apply the strong header immediately
 /tier models                                # list registered providers and their models
-/tier set <strong|cheap> <provider> <model> [effort]
-/tier subagent <inherit|cheap|strong>       # policy used to classify subagent execution (guard)
+/tier main                                  # route this session to the main tier (three-tier layout only)
+/tier layout <two|three>                    # two tiers (default) or three (adds main; strong escalates)
+/tier roles <on|off>                        # advisor and reviewer on their own models, or on the strong route
+/tier gate explore <n>                      # read/search calls required before exit_plan_mode (0 disables)
+/tier gate advisor <on|off>                 # advisor reviews each plan once before you see it
+/tier set <strong|main|cheap|advisor|reviewer> <provider> <model> [effort]
+/tier set <strong|main> follow-session      # follow the session model selection
+/tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # subagent route; caller is for fork only, capped never goes above main
 /tier review <focus>                        # strong-tier review
 ```
 
@@ -195,7 +223,7 @@ Sample output (`/tier status`):
 Tiered model routing
   mode: global=auto, this session=auto (per-session via /tier strong|cheap|auto|delegated|off; escalate: 2 errors / 60s window -> 180s strong)
   strong: deepseek-official/deepseek-v4-pro (max)
-  cheap:  deepseek-official/deepseek-v4-flash (medium)
+  cheap:  deepseek-official/deepseek-v4-flash (low)
   subagents: inherit
   diag: requestSteps=42 guardChecks=31 guardDenies=3 headerWrites=4 errorsSeen=0 escalations=0
   session default: deepseek-official/deepseek-v4-pro (max)
@@ -209,8 +237,8 @@ Tiered model routing
 | `tier_advisor` | Strong-tier consultation: one question + evidence -> advice / risks / acceptance criteria |
 | `tier_review` | Strong-tier review: change set + validation results -> verdict with ranked issues |
 | `tier_route` | Set **this session's** tier (strong/cheap/auto/delegated/off, optionally persisted) |
-| `tier_configure` | Reconfigure either tier's provider/model/effort and the subagent policy |
-| `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / toolFilter / maxDepth / persona |
+| `tier_configure` | Reconfigure a tier (strong/main/cheap) or a role (advisor/reviewer) provider/model/effort, and the subagent policy |
+| `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / agentPreset / maxDepth / background |
 | `tier_status` | Read-only diagnostics: global & session tiers, escalation state, listener counters, effective tier |
 
 ## Configuration
@@ -219,11 +247,13 @@ Runtime configuration (no restart needed):
 
 ```sh
 /tier set strong deepseek-official deepseek-v4-pro max
-/tier set cheap deepseek-official deepseek-v4-flash medium
+/tier set cheap deepseek-official deepseek-v4-flash low
 ```
 
-`/tier set` and `tier_configure` persist the tier configuration in the `tier-router`
-settings namespace (survives restarts; pass `sessionOnly: true` for a transient change).
+`/tier set` and `tier_configure` persist the tier configuration on the host
+`tier-routing` profile entry (survives restarts; pass `sessionOnly: true` for a
+transient change). When the `settings` service is unreachable the plugin falls
+back to in-memory configuration and `/tier status` says so honestly.
 `tier_route strong|cheap|delegated` scopes to the current session and does NOT persist by default;
 pass `persist: true` to also write the session default model (`agent-default-model`).
 Failure auto-escalation parameters (threshold / window / TTL) are currently built-in
@@ -232,9 +262,17 @@ constants; configurable in a later version.
 ## Tests
 
 ```sh
-npm test        # node:test — 20 cases: guard positive/negative matrix, tier decision precedence, per-session overrides
-npm run check   # syntax check for lib/index.js and lib/pure.js
+npm test        # node:test — pure core logic + a mocked-context smoke suite covering
+                # the agent/request waterfall, settings persistence, startActivation,
+                # fallback chains, escalation and guard paths
+npm run check   # syntax check for lib/index.js, lib/core/* and lib/dsh/*
 ```
+
+Architecture notes for contributors: `lib/core/` is pure decision logic with no
+DSH imports or I/O (unit-testable); `lib/dsh/` contains the only harness-facing
+adapters (service probe, routing seam strategies, subagent/jobs adapters, the
+settings bridge). A DSH breaking change should be fixable inside one `lib/dsh/`
+file — that is the compatibility boundary by design.
 
 Verified in live multi-round sessions (dynamic-plugin form):
 
@@ -244,7 +282,7 @@ Verified in live multi-round sessions (dynamic-plugin form):
 | Guard matrix (auto/strong/off) | ✅ auto denies / strong allows / off allows + restores default / auto-restored denies |
 | Guard hardening (split flags, runner prefixes, prose, .env whitelist, case) | ✅ 7/7 live probes |
 | Tools, positive paths | ✅ advisor/review hit the strong tier; route modes; configure; worker on both spawn and fork providers |
-| Worker options | ✅ outputSchema structured result, toolFilter restriction, maxDepth rejection, invalid filter error |
+| Worker options | ✅ outputSchema structured result, agentPreset pass-through, maxDepth rejection, background jobs (toolFilter/persona verified on the pre-0.2 API; removed upstream since) |
 | Tools, negative paths | ✅ invalid provider rejected, invalid subagent provider error |
 | Subagent tiering | ✅ cheap tier on flash, strong tier on pro (child logs + return values) |
 | Failure-escalation event path | ✅ `agent/error` fires, counters increment, off mode correctly skips |
@@ -260,8 +298,9 @@ session** only; other sessions default to `auto` independently. A session that s
 be managed runs `/tier off` to opt out.
 
 **Q: The tier switch did not take effect immediately?**
-Tier switches are written to the session header before the step is built, so they apply
-from the **next step** (one-step delay).
+On DSH 0.2 the `agent/request` waterfall applies routing to the very next model
+call — there is no one-step delay. If `/tier status` reports `routing seam:
+header` (older runtime), the switch applies from the next step instead.
 
 **Q: How do I use subscription-channel models (OpenCode Go / MiniMax)?**
 Run `/tier models` to confirm the provider is registered and its models are configured,
@@ -274,22 +313,42 @@ The guard's message tells you: switch to the strong tier first (`tier_route stro
 running destructive actions directly.
 
 **Q: `/tier` does not appear after installing the bundle?**
-The package is an agent-plane plugin: it must be a row in the agent preset your
-session uses (see Installation). A host bundle row alone activates nothing —
-agent-plane services (`tools`, `commands`, `systemPrompt`) are only reachable
-from the preset scope, and this package ships no host insert by design. After
-adding the row, restart `dsh web` and verify with `/tier status`. (The
-dynamic-plugin form is a process-local temporary instance and disappears on
-restart.)
+The session must be on the `tiered` preset (see Installation): routing is
+agent-plane and only mounts inside that preset. The host `tier-routing` row
+alone only carries the settings page. After switching presets, open a new
+session and verify with `/tier status`.
 
 ## Known limitations
 
-- Tier switches take effect from the next step (the header is written before the step builds).
+- On the header fallback seam (older runtimes), tier switches take effect from the
+  next step; on the 0.2 waterfall seam they apply to the current request.
+- `tier_worker`'s `agentPreset` option requires a subagent provider that declares
+  preset support (`spawn` does); `toolFilter`/`persona` were removed upstream and
+  cannot be emulated reliably.
 - The subagent policy (`/tier subagent`) is process-wide and classifies child execution
   for the guard. A worker's tier is fixed at creation (`tier_worker` agentOptions); built-in
   `subagent`/`subagent_fork` children inherit the parent's model route.
+- If the `settings` service is absent, configuration is in-memory only.
 - The full live "fail -> self-heal" sequence for failure auto-escalation has been verified
   at the event path and unit-logic level; trigger it live per the FAQ if desired.
+
+## Roadmap (not implemented yet)
+
+- **N named tiers** beyond strong/cheap (`lib/core/tiers.js` is already an ordered
+  registry; the config schema would gain an `extraTiers` field).
+- **Ask-before-escalate policy**: `lib/core/policy.js` reserves an `ask` action and an
+  `awaiting-confirm` escalation phase so a future version can prompt before handing a
+  task to the stronger tier.
+- **New consultation kinds**: `lib/core/consult.js` is a registry — advisor/review are
+  entries; `delegate`/`diff-review` entries can be added without new plumbing.
+- **Decision-model adapter (Jev / Clef / OpenRouter Decisions)**: a planned opt-in
+  `lib/dsh/decisions.js` posting `{state, questions}` (noul/choice/score) to the
+  OpenRouter Decisions API (`/api/alpha/decisions`) or any Jev-compatible endpoint
+  (e.g. self-hosted `laya-server`); the model id is a config field, so Jev,
+  Perplexity Decider, Clef, Drex etc. are interchangeable without code changes.
+  Target use: the `ask` policy action, second-stage guard classification, and
+  tier selection for `tier_worker`/`consult` — not the per-request hot path.
+  No key or endpoint → silent fallback to the deterministic policy.
 
 ## License
 

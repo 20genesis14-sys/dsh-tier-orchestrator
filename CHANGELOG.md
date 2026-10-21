@@ -1,6 +1,217 @@
 # Changelog
 
 All notable changes to dsh-tier-router are documented here.
+
+## [0.7.1] - 2026-10-21
+
+### Fixed
+
+- **Sessions became unloadable after plan-mode switches and `/tier` commands.** In
+  waterfall mode the plugin still appended `request/header` from listeners and
+  commands (plan-mode flips, `/tier` routing changes). Between turns that header
+  falls outside an open turn, and DSH then refuses to load the session
+  (`request/header is outside an open turn`). Waterfall mode now writes nothing
+  there: the loop logs the header itself. Legacy header mode is unchanged. A
+  regression test covers the commands and the plan-mode flip.
+
+## [0.7.0] - 2026-10-21
+
+### Added
+
+- **Two independent switches.** `/tier layout <two|three>` adds a `main` tier
+  between strong and cheap: plan mode runs on main, execution on cheap, and
+  strong becomes the escalation tier (failure auto-escalation, `/tier strong`,
+  `tier_route`). The two-tier layout stays the default and behaves as before.
+  `/tier roles <on|off>` gives advisor and reviewer their own models through
+  `/tier set advisor|reviewer` or `tier_configure`; off, they use the strong
+  route. A role has no fallback chain of its own and falls back to the strong
+  chain. The main tier takes `followSession` like strong; the guard denies
+  high-impact actions on the cheap tier only, as before.
+- **Plan-exit gate.** While plan mode is active, `exit_plan_mode` is checked
+  before the plan reaches you. First, the agent must have read or searched the code
+  at least `planMinExplore` times (default 2, counted per plan with `read`, `glob`,
+  `grep`); otherwise the call is denied with that reason and the agent explores
+  and presents again. Second, when `planAdvisorGate` is on (default), the advisor
+  reviews each plan once: its advice is returned to the agent as the denial, and
+  the revised plan then goes to you. If the advisor is unavailable the plan
+  proceeds without review. Set with `/tier gate explore <n>` and
+  `/tier gate advisor <on|off>`. Verified with mocks only.
+- **Separate policies for spawn and fork subagents.** `spawnPolicy` (the built-in
+  `subagent` tool) and `forkPolicy` (`subagent_fork`) override the shared
+  `subagentPolicy`; a blank override falls back to it. A child's kind comes from its
+  session header (`isSeeded` marks fork lineage). Set with
+  `/tier subagent spawn|fork <policy>` or `tier_configure`. Defaults stay `inherit`.
+- **Policy `capped`.** The parent's route, but never above the cap tier: `main` in
+  three tiers, `cheap` in two (there is no middle tier to cap at).
+- **`caller` is for fork children only.** A spawn child starts with an empty
+  conversation, so it gains no cache from the parent. A global `caller` makes spawn
+  children use `inherit`.
+- **Subagent policy `caller`.** `/tier subagent caller` (and `tier_configure`
+  with `subagentPolicy: "caller"`) routes a subagent child on its parent's current
+  route instead of the tier rules. The parent is found through the child's session
+  lineage (`parentSession`).
+- **Explicit subagent routes are kept.** When the caller of `subagent` picks a
+  provider/model for a child, the router no longer overwrites that route on every
+  request. The decision is taken once, on the child's first request: a seed that
+  differs from the parent's route and is not one of the tier routes counts as
+  explicit. Escalation after repeated failures still routes the child to strong,
+  and tier_worker children keep their tier. Verified with mocks only.
+- **Reviewer chain drift warning in `/tier status`.** A `review chain:` line
+  names any reviewer fallback step that shares a model family with an
+  implementer, because a failing reviewer would hand the verdict to a same-family model.
+- **Form fields** in the WebUI tier form for the layout and roles switches, the
+  main tier, and both role routes.
+- **Reviewer independence warning in `/tier status`.** The review line shows the
+  reviewer's model family and warns when an implementer (the cheap tier or the
+  session model) shares it, since a same-family reviewer shares its blind spots.
+  The family is the series token of the model id, so `deepseek-v4-pro` and
+  `deepseek-v4-flash` match, and so do the same model served by two providers.
+
+### Changed
+
+- **A followed tier's explicit pair is the first fallback step.** When strong or
+  main follows the session model, its explicit provider/model/effort is tried
+  right after the session model, then the configured chain (duplicates dropped).
+  This matches the `tier_configure` description; before, the explicit pair was
+  never used while the session selection was available. Existing configurations
+  gain one extra fallback attempt when the chain did not already contain it.
+- **Routes shown in `/tier status`** include the effective chain (explicit pair
+  first when followed) and the reviewer line reflects the role route when roles
+  are on.
+
+### Fixed
+
+- **Consultations use the strong fallback chain.** `tier_advisor`, `/advisor`,
+  `tier_review` and `/tier review` called the primary strong route only, so an
+  unavailable model stranded them while the chain sat unused. They now try the
+  primary route, then the strong chain, moving on for the same failures the main
+  request path falls back on (quota, rate limit, unknown model, credentials,
+  5xx, transport, unregistered provider). Context-size and other non-model
+  failures stop at once. The consult answer names the route that served it.
+- **An unregistered provider route is a fallback trigger.** `NO_ADAPTER` (the
+  DSH llm code for a provider with no adapter) now moves both the main request
+  path and consultations to the next chain entry.
+
+## [0.6.3] - 2026-12-16
+
+### Fixed
+
+- **The model catalog could not be read in the Desktop**: the client called
+  `ctx.remote.session.modelCatalog()` without declaring `remote.session` in its
+  `inject` list, so every read failed with "cannot get property
+  \"remote.session\" without inject" and the form fell back to free text. The
+  client now declares it, as the session picker does, and a test pins the
+  declaration.
+
+## [0.6.2] - 2026-12-16
+
+### Fixed (Desktop field report: empty model lists)
+
+- **Model lists come from the session catalog, as the session picker does.** The
+  form read `remote.llm` directly, which returned an empty provider list when the
+  first read happened before the adapters registered, so every provider and model
+  field fell back to free text. It now reads `remote.session.modelCatalog()`, the
+  same answer the session model picker uses.
+- **Empty and failed reads are not cached.** The catalog is re-read on open, on
+  `llm/adapters-updated`, on `settings/document-updated`, on reconnect, and by a
+  Refresh button. A ready catalog is kept in memory; concurrent loads share one read.
+- **One grouped model dropdown per tier**: an `<optgroup>` per provider, labelled
+  with the provider names from the catalog. Picking a model also resets an effort
+  the new model does not declare.
+- **Effort dropdown from the model's declaration**: the levels come from
+  `reasoning.efforts` with the model's default marked. A model without reasoning
+  support shows that instead of an input; a route the catalog does not list keeps
+  a free-text level.
+- **Status line with counts and provider failures**: "Providers: N · Models: M",
+  the reason when the catalog is empty or unreadable, and each provider that could
+  not list its models, with the Host's message.
+- **"Route not listed"** switches a tier to separate provider and model inputs for
+  routes outside the catalog (custom endpoints, unlisted OpenRouter models).
+
+## [0.6.1] - 2026-12-16
+
+### Fixed (Desktop 0.2.1-rc.2 field report)
+
+- **Reasoning effort is fitted to the route before dispatch**: DSH rejects an
+  undeclared effort (`UNSUPPORTED_REASONING_EFFORT`), and `deepseek-v4-flash`
+  declares only `off`/`low`/`high`/`max` — the old `medium` cheap default made
+  every cheap-tier request fail. The cheap tier now starts at `low`; the
+  `agent/request` waterfall, `tier_advisor`/`tier_review`/`tier_worker` calls
+  and the header fallback consult `llm.resolveModelInfo` (cached per route) and
+  substitute the nearest declared level, or send no `reasoningEffort` at all for
+  a model that declares no reasoning support (many OpenRouter routes). Pure
+  logic: `reconcileReasoningEffort` in `lib/core/routing.js`; the cache lives in
+  `lib/dsh/model-capabilities.js`.
+- **The settings form now renders on the bundle page**: the browser half
+  registered into `plugins.item`, which the Plugins page only renders for the
+  shipped official settings pages — nothing appeared on `dsh-tier-router`'s own
+  page. It now registers `plugins.bundle.config` (key `dsh-tier-router`) and
+  `plugins.row.config` (key `dsh-tier-router#tier-routing`), so the form sits on
+  the bundle page and the `tier-routing` component row opens it as a page.
+- **Provider and model are picked from the live catalog**: the form reads
+  `remote.llm.listProviders()` / `listModels()` and renders dropdowns, keeping a
+  free-text mode for routes the catalog does not list (custom endpoints,
+  unlisted OpenRouter models).
+- **Slash-command results are visible in a fresh session**: a command writes no
+  turn, so a brand-new session stays on the hero screen and its `command/done`
+  node is invisible. The client now listens to `command/executed` and shows
+  `/tier` and `/advisor` output in a dismissible floating panel (plus the
+  expanded in-transcript renderer).
+
+## [0.6.0] - 2026-12-16
+
+### Changed (DSH 0.2.1-rc.2 compatibility)
+
+- **Routing moved to the `agent/request` waterfall**: the router returns the
+  routed `LlmCallConfig` for every model request, so tier switches apply to the
+  current step (the old one-step delay is gone) and the loop writes
+  `request/header` itself. A `request/header` write strategy remains as a
+  capability-detected fallback for older runtimes.
+- **Configuration moved to the host profile entry**: all tier fields are
+  volatile members of the host-level `tier-routing` row's Config schema, so DSH
+  renders the settings page automatically and persists edits through the
+  profile patch. Agent-plane code reads/writes them through the `settings`
+  service bridge; if `settings` is absent the plugin degrades to in-memory
+  configuration and `/tier status` reports it.
+- **Preset declared via `@deepseek-ai/dsh-agent-preset`**: `cordis.patch.yml`
+  now carries a host config row plus a `preset-tiered` declaration listing the
+  full 0.2.x standard roster plus the agent-plane `tier-routing-agent` row.
+  The file-synced `agent-presets/` directory and `lib/preset-sync.js` are gone
+  (DSH 0.2 no longer scans `~/.dsh/.agent-presets`).
+- **Subagents use `startActivation`**: `tier_worker` starts workers through the
+  new spec (`{provider, label, request, signal, delivery}`) and resolves the
+  child agent via `agents.get(activation.childId)`; a legacy `start()` adapter
+  remains for older runtimes.
+- **`tier_worker` option changes**: `toolFilter` and `persona` were removed
+  upstream — use `agentPreset` (requires a provider declaring preset support,
+  e.g. `spawn`). `tier`, `outputSchema`, `maxDepth` and `background` are
+  unchanged.
+- **Jobs owner is a SessionId**: background workers pass `owner: session.id`.
+- **Layered architecture**: pure decision logic lives in `lib/core/`
+  (`tiers`, `routing`, `guard`, `policy`, `consult`, `metrics`) with no DSH
+  imports or I/O; every harness contact point is isolated in `lib/dsh/`
+  adapters (`services` probe, `routing-seam` strategies, `subagents`, `jobs`,
+  `config` bridge). Future DSH breaking changes should land inside a single
+  adapter file.
+- **Startup capability probe**: `/tier status` reports the active routing seam
+  and any missing capability; each feature degrades independently instead of
+  failing the whole plugin.
+
+### Roadmap (documented, not implemented)
+
+- Opt-in decision-model adapter (Jev / Clef / OpenRouter Decisions API or a
+  Jev-compatible self-hosted endpoint such as `laya-server`) feeding the
+  reserved `ask` policy action, second-stage guard classification and
+  worker/consult tier selection; deterministic policy remains the default.
+- N named tiers via the `lib/core/tiers.js` registry.
+- Additional consult registry entries (`delegate`, `diff-review`).
+
+### Removed
+
+- `lib/preset-sync.js`, `agent-presets/`, `client/client.js`, `tests/preset-sync.test.mjs`
+- `dsh.client` metadata and `client`/`agent-presets` from `files`
+- `tier_worker` parameters `toolFilter` and `persona` (removed upstream)
+
 ## [0.5.0] - 2026-08-24
 
 ### Added
