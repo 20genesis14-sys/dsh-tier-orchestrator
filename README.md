@@ -1,4 +1,4 @@
-# dsh-tier-router — Tiered model routing for DeepSeek Harness
+# dsh-tier-orchestrator — Tiered model routing for DeepSeek Harness
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/dsh-plugin-ready-4B32C3)](https://github.com/topics/dsh-plugin)
@@ -179,14 +179,14 @@ sequenceDiagram
 
 ```sh
 # 1. Install into the profile.
-dsh plugin --profile web add dsh-tier-router
+dsh plugin --profile web add dsh-tier-orchestrator
 
 # Local development uses the same installation path:
 dsh plugin --profile web add .
 
 # 2. Restart DSH, then choose "tiered" or "tiered-minimal" in the preset
 #    picker for a new session (or make it the profile default). Configure on
-#    the Plugins page: the dsh-tier-router card expands into the "Tier
+#    the Plugins page: the dsh-tier-orchestrator card expands into the "Tier
 #    routing" form once a session on either preset has run (the settings
 #    namespace is host-served).
 ```
@@ -197,7 +197,7 @@ Two presets are provided:
 - **`tiered-minimal`** — a Pi-like minimal prompt (see
   [Minimal preset](#minimal-preset-tiered-minimal)).
 
-Uninstall: `dsh plugin --profile web remove dsh-tier-router` removes both the
+Uninstall: `dsh plugin --profile web remove dsh-tier-orchestrator` removes both the
 host entry and the `tiered` preset on the next startup.
 
 ### Post-install acceptance checklist

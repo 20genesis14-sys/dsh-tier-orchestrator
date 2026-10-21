@@ -202,6 +202,6 @@ test('apply registers the form on the bundle and row seats, never on plugins.ite
   assert.ok(slots.includes('shell.overlay'))
   assert.ok(slots.includes('conversation.chat.commandview'))
   assert.ok(!slots.includes('plugins.item'), 'plugins.item belongs to the shipped official pages')
-  assert.ok(keys.includes('dsh-tier-router'))
-  assert.ok(keys.includes('dsh-tier-router#tier-routing'))
+  assert.ok(keys.includes('dsh-tier-orchestrator'))
+  assert.ok(keys.includes('dsh-tier-orchestrator#tier-routing'))
 })

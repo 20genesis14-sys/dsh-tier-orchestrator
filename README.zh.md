@@ -1,4 +1,4 @@
-# dsh-tier-router — 分层模型路由 for DeepSeek Harness
+# dsh-tier-orchestrator — 分层模型路由 for DeepSeek Harness
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![dsh-plugin](https://img.shields.io/badge/dsh-plugin-ready-4B32C3)](https://github.com/topics/dsh-plugin)
@@ -133,13 +133,13 @@ sequenceDiagram
 
 ```sh
 # 1. 安装到 profile。
-dsh plugin --profile web add dsh-tier-router
+dsh plugin --profile web add dsh-tier-orchestrator
 
 # 本地开发同样使用该安装路径：
 dsh plugin --profile web add .
 
 # 2. 重启 DSH，在新会话的预设选择器中选择 “tiered” 或 “tiered-minimal”
-#    （或设为默认）。配置入口：插件管理页 → dsh-tier-router 卡片 → 展开出
+#    （或设为默认）。配置入口：插件管理页 → dsh-tier-orchestrator 卡片 → 展开出
 #    “Tier routing” 设置表单（命名空间由 host 提供，需先用任一预设跑过一个会话）。
 ```
 
@@ -148,7 +148,7 @@ dsh plugin --profile web add .
 - **`tiered`** — 标准组合：完整 DSH 工具集 + 分档路由。
 - **`tiered-minimal`** — Pi 式极简提示（见 [极简预设](#极简预设tiered-minimal)）。
 
-卸载：`dsh plugin --profile web remove dsh-tier-router`，下次启动后 host 条目与
+卸载：`dsh plugin --profile web remove dsh-tier-orchestrator`，下次启动后 host 条目与
 `tiered` preset 一并消失。
 
 ### 安装后验收清单

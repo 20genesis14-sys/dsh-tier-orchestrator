@@ -1,4 +1,4 @@
-// Packaging / manifest integrity checks for dsh-tier-router.
+// Packaging / manifest integrity checks for dsh-tier-orchestrator.
 // Run with: node --test tests/
 
 import { test } from 'node:test'
@@ -40,7 +40,7 @@ test('package entry and exports are consistent', () => {
 test('cordis.patch declares the host entry plus the tiered preset composition', () => {
   // Host-plane row: volatile config lives on the profile entry so SettingsForms
   // can render and persist it.
-  assert.match(patch, /id:\s*tier-routing[\s\S]*?name:\s*dsh-tier-router/)
+  assert.match(patch, /id:\s*tier-routing[\s\S]*?name:\s*dsh-tier-orchestrator/)
   // Agent-plane preset declaration.
   assert.match(patch, /id:\s*preset-tiered/)
   assert.match(patch, /name:\s*'@deepseek-ai\/dsh-agent-preset'/)
@@ -78,7 +78,7 @@ test('client bundle follows the ModuleLoader/slot contract', () => {
   // `plugins.item` is reserved for the shipped official settings pages.
   assert.match(src, /'plugins\.bundle\.config'/)
   assert.match(src, /'plugins\.row\.config'/)
-  assert.match(src, /dsh-tier-router#/)
+  assert.match(src, /dsh-tier-orchestrator#/)
   assert.match(src, /'shell\.overlay'/)
   assert.match(src, /command\/executed/)
   assert.match(src, /remote\.session\.modelCatalog\(\)/)

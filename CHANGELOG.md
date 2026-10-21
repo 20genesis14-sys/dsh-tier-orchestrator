@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to dsh-tier-router are documented here.
+All notable changes to dsh-tier-orchestrator are documented here.
 
 ## [0.9.0] - 2026-10-21
 
@@ -233,9 +233,9 @@ All notable changes to dsh-tier-router are documented here.
   `lib/dsh/model-capabilities.js`.
 - **The settings form now renders on the bundle page**: the browser half
   registered into `plugins.item`, which the Plugins page only renders for the
-  shipped official settings pages — nothing appeared on `dsh-tier-router`'s own
-  page. It now registers `plugins.bundle.config` (key `dsh-tier-router`) and
-  `plugins.row.config` (key `dsh-tier-router#tier-routing`), so the form sits on
+  shipped official settings pages — nothing appeared on `dsh-tier-orchestrator`'s own
+  page. It now registers `plugins.bundle.config` (key `dsh-tier-orchestrator`) and
+  `plugins.row.config` (key `dsh-tier-orchestrator#tier-routing`), so the form sits on
   the bundle page and the `tier-routing` component row opens it as a page.
 - **Provider and model are picked from the live catalog**: the form reads
   `remote.llm.listProviders()` / `listModels()` and renders dropdowns, keeping a
@@ -361,7 +361,7 @@ All notable changes to dsh-tier-router are documented here.
   collapses multi-line output to a one-line summary), with success/running/
   failure states.
 - **Automatic tiered preset discovery**: the profile bundle now mounts a
-  host-only synchronizer. After `dsh plugin --profile web add dsh-tier-router`,
+  host-only synchronizer. After `dsh plugin --profile web add dsh-tier-orchestrator`,
   DSH startup validates and synchronizes the packaged `tiered` preset into the
   user discovery root (`~/.dsh/.agent-presets` or `DSH_HOME/.agent-presets`).
   The host row never mounts routing tools; selecting `tiered` still mounts the

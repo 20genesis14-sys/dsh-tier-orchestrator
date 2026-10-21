@@ -1,10 +1,10 @@
-// dsh-tier-router client — the WebUI configuration surface (browser half).
+// dsh-tier-orchestrator client — the WebUI configuration surface (browser half).
 //
 // Three seats, all on the Plugins page where users actually look:
-//   plugins.bundle.config  key 'dsh-tier-router'                     — the
+//   plugins.bundle.config  key 'dsh-tier-orchestrator'                     — the
 //       bundle page renders the form between the description and the
 //       component rows;
-//   plugins.row.config     key 'dsh-tier-router#tier-routing'        — makes
+//   plugins.row.config     key 'dsh-tier-orchestrator#tier-routing'        — makes
 //       the host-plane `tier-routing` component row clickable and opens the
 //       same form as its own page;
 //   shell.overlay          — a floating result panel for `/tier` and
@@ -19,7 +19,7 @@
 // Hand-authored CJS bundle (no build step): the host ModuleLoader resolves
 // `react` and `@deepseek-ai/dsh-client-ui-primitives` by id.
 
-window.__ModuleLoader__.load({ id: "dsh-tier-router", factory: (require) => {
+window.__ModuleLoader__.load({ id: "dsh-tier-orchestrator", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 'use strict'
 
@@ -33,7 +33,7 @@ const useEffect = React.useEffect
 
 const NS = 'settings.tierRouting'
 const SETTINGS_NS = 'tier-routing'
-const BUNDLE_NAME = 'dsh-tier-router'
+const BUNDLE_NAME = 'dsh-tier-orchestrator'
 const ROW_KEY = BUNDLE_NAME + '#' + SETTINGS_NS
 
 const en = {
@@ -780,16 +780,16 @@ const inject = ['slots', 'locale', 'configForms', 'remote', 'remote.session']
 
 function apply(ctx) {
   const t = ctx.locale.bind(NS)
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-tier-router: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-tier-orchestrator: dictionaries')
 
   const card = new TierRoutingCardController(ctx.configForms.get(SETTINGS_NS))
-  ctx.effect(() => () => card.dispose(), 'dsh-tier-router: form subscription')
+  ctx.effect(() => () => card.dispose(), 'dsh-tier-orchestrator: form subscription')
 
   const catalog = createCatalog(ctx)
   ctx.effect(() => [
     ctx.remote.$on('llm/adapters-updated', () => { catalog.load(true) }),
     ctx.remote.$on('settings/document-updated', () => { catalog.load(true) }),
-  ], 'dsh-tier-router: catalog invalidations')
+  ], 'dsh-tier-orchestrator: catalog invalidations')
   ctx.on('connection/reset', () => { catalog.load(true) })
 
   const face = () => {
@@ -809,14 +809,14 @@ function apply(ctx) {
     key: BUNDLE_NAME,
     locale: NS,
     inject: face,
-  }, TierRoutingCard)), 'dsh-tier-router: bundle configuration')
+  }, TierRoutingCard)), 'dsh-tier-orchestrator: bundle configuration')
 
   ctx.effect(() => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
     name: 'plugins.row.config',
     key: ROW_KEY,
     locale: NS,
     inject: face,
-  }, TierRoutingCard)), 'dsh-tier-router: row configuration')
+  }, TierRoutingCard)), 'dsh-tier-orchestrator: row configuration')
 
   // /tier and /advisor results: expanded in the transcript and, because a
   // command writes no turn, also surfaced as a floating panel.
@@ -833,14 +833,14 @@ function apply(ctx) {
       kind: result && result.kind ? result.kind : 'success',
       text: text === null || text.trim() === '' ? '(no output)' : text,
     })
-  }), 'dsh-tier-router: command results')
+  }), 'dsh-tier-orchestrator: command results')
 
   ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'tier-routing-command-result',
     locale: NS,
     inject: () => ({ hooks: { commandNotice: notice }, dismiss }),
-  }, CommandNoticePanel)), 'dsh-tier-router: command result panel')
+  }, CommandNoticePanel)), 'dsh-tier-orchestrator: command result panel')
 
   for (const cmd of ['tier', 'advisor']) {
     ctx.effect(() => ctx.slots.inject('conversation.chat.commandview', () =>
@@ -851,7 +851,7 @@ function apply(ctx) {
         key: cmd,
         locale: NS,
         inject: () => ({ t }),
-      }, TierCommandView)), 'dsh-tier-router: commandview ' + cmd)
+      }, TierCommandView)), 'dsh-tier-orchestrator: commandview ' + cmd)
   }
 }
 

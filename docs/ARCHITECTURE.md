@@ -1,4 +1,4 @@
-# dsh-tier-router — Architecture
+# dsh-tier-orchestrator — Architecture
 
 This document explains how the plugin works end to end: what gets installed,
 how a user message turns into a routed model call, what state lives where, and
@@ -206,7 +206,7 @@ the missing list — the first thing to check when debugging on a new DSH build.
 
 Two `- insert:` rows:
 
-1. `id: tier-routing / name: dsh-tier-router` — host config row (volatile
+1. `id: tier-routing / name: dsh-tier-orchestrator` — host config row (volatile
    defaults shown).
 2. `id: preset-tiered / name: '@deepseek-ai/dsh-agent-preset'` with
    `config.id: tiered`, `order: 20`, and `plugins:` = the full 0.2.1 standard

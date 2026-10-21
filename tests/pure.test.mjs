@@ -1,4 +1,4 @@
-// Unit tests for the pure core logic of dsh-tier-router (no harness required).
+// Unit tests for the pure core logic of dsh-tier-orchestrator (no harness required).
 // Run with: node --test tests/
 
 import { test } from 'node:test'

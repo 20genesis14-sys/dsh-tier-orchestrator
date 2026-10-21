@@ -1,6 +1,6 @@
 # AGENTS.md — working contract for LLM agents on this repo
 
-You are editing **dsh-tier-router**, a DeepSeek Harness (DSH) Cordis plugin that
+You are editing **dsh-tier-orchestrator**, a DeepSeek Harness (DSH) Cordis plugin that
 routes model requests between a strong tier (planning/review) and a cheap tier
 (implementation). Target host: **DSH `0.2.1-rc.2`** (developer preview — APIs
 change between releases; capability-probe everything).

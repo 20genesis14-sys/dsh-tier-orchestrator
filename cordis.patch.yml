@@ -1,4 +1,4 @@
-# dsh-tier-router profile bundle (DSH >= 0.2).
+# dsh-tier-orchestrator profile bundle (DSH >= 0.2).
 #
 # Row 1 — `tier-routing` (host): owns the durable, WebUI-editable tier
 # configuration. Every volatile field below appears on the plugin's
@@ -11,7 +11,7 @@
 # for sessions on this preset.
 - insert:
     - id: tier-routing
-      name: dsh-tier-router
+      name: dsh-tier-orchestrator
       config:
         plane: host
         mode: auto
@@ -160,7 +160,7 @@
           # Consumes host services only (tools, commands, systemPrompt,
           # settings, llm, subagents, jobs); needs no isolate realm.
           - id: tier-routing-agent
-            name: dsh-tier-router
+            name: dsh-tier-orchestrator
             config:
               plane: agent
 
@@ -258,7 +258,7 @@
           # plugin register Pi-style read/edit/write tools and collapse the
           # tier-routing prompt section to a few lines.
           - id: tier-routing-agent
-            name: dsh-tier-router
+            name: dsh-tier-orchestrator
             config:
               plane: agent
               promptMode: pi
