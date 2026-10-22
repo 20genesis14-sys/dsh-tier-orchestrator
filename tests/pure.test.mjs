@@ -9,7 +9,7 @@ import { escalationStep, escalationActive, escalationExpired, decideGuardAction,
 import { consultSpec, CONSULTS, modelFamily, reviewerConflicts } from '../lib/core/consult.js'
 import { childRouteSource, cappedTier } from '../lib/core/routing.js'
 import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/core/tiers.js'
-import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS } from '../lib/core/turbovec.js'
+import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS, DIGEST_MAX_PER_STAGE } from '../lib/core/turbovec.js'
 import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, formatMemoryBlock, digestStagesFor, WORKER_STAGE, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
 import { decideAdvisorBudget } from '../lib/core/policy.js'
 import {
@@ -225,12 +225,23 @@ test('reconcileReasoningEffort substitutes an undeclared effort with a declared 
   assert.equal(reconcileReasoningEffort('max', deepseek).reason, null)
 })
 
-test('reconcileReasoningEffort prefers the model default then the lowest declared', () => {
+test('reconcileReasoningEffort prefers the model default, then the nearest declared level', () => {
   const defaulted = { efforts: [{ id: 'high' }, { id: 'max' }], defaultEffort: 'max' }
   assert.equal(reconcileReasoningEffort('medium', defaulted).effort, 'max')
   const noDefault = { efforts: [{ id: 'high' }, { id: 'max' }] }
   assert.equal(reconcileReasoningEffort('medium', noDefault).effort, 'high')
   assert.equal(reconcileReasoningEffort('low', { efforts: [] }).effort, 'low', 'lenient without ids')
+})
+
+test('an undeclared effort falls to the nearest declared level, never to the floor', () => {
+  const capped = { efforts: [{ id: 'low' }, { id: 'medium' }, { id: 'high' }] }
+  assert.equal(reconcileReasoningEffort('max', capped).effort, 'high', 'a max request keeps the model ceiling')
+  assert.equal(reconcileReasoningEffort('high', capped).effort, 'high')
+  assert.equal(reconcileReasoningEffort('medium', capped).effort, 'medium')
+  const offFirst = { efforts: [{ id: 'off' }, { id: 'high' }] }
+  assert.equal(reconcileReasoningEffort('low', offFirst).effort, 'off', 'the nearest lower level, no upgrade')
+  assert.equal(reconcileReasoningEffort('off', capped).effort, 'low', 'below every declared level: the floor')
+  assert.equal(reconcileReasoningEffort('minimal', { efforts: [{ id: 'high' }, { id: 'max' }] }).effort, 'high', 'an unknown id never invents a level')
 })
 
 // ---- policy: escalation state machine -------------------------------------------
@@ -504,7 +515,7 @@ test('TurboQuant import skips corrupt entries and reports them', () => {
 
 // ---- v0.8.1: digest cards, filters, deterministic sort, v2 import ----------
 
-test('upsertDigest stores cards and caps per stage at 16', () => {
+test('upsertDigest stores cards below the per-stage cap', () => {
   const idx = createTurboQuantIndex({ dim: 512 })
   for (let i = 0; i < 10; i++) {
     idx.upsertDigest({ stage: 'implement', area: 'area-' + i, diffSummary: 'change ' + i, checks: 'pass' })
@@ -514,22 +525,23 @@ test('upsertDigest stores cards and caps per stage at 16', () => {
   assert.equal(st.snippets, 0)
 })
 
-test('the per-stage digest cap keeps 16 cards and evicts the 17th oldest', () => {
+test('the per-stage digest cap keeps DIGEST_MAX_PER_STAGE cards and evicts the oldest', () => {
   const idx = createTurboQuantIndex({ dim: 512 })
-  for (let i = 0; i < 17; i++) {
+  const cap = DIGEST_MAX_PER_STAGE
+  for (let i = 0; i < cap + 1; i++) {
     idx.upsertDigest({ stage: 'implement', area: 'area-' + i, diffSummary: 'change ' + i, checks: 'pass', updatedAt: i + 1 })
   }
   const st = idx.stats()
-  assert.equal(st.digests, 16, 'the cap is 16 cards per stage')
+  assert.equal(st.digests, cap, 'the cap is DIGEST_MAX_PER_STAGE cards per stage')
   const paths = idx.exportState().entries.filter((e) => e.kind === 'digest').map((e) => e.path).sort()
-  assert.equal(paths.length, 16)
-  assert.ok(paths.includes('area-16'), 'the newest card is kept')
+  assert.equal(paths.length, cap)
+  assert.ok(paths.includes('area-' + cap), 'the newest card is kept')
   assert.ok(!paths.includes('area-0'), 'the oldest card was evicted')
   assert.ok(paths.includes('area-1'))
   // Another stage keeps its own quota.
   idx.upsertDigest({ stage: 'worker', area: 'w-1', diffSummary: 'worker change', updatedAt: 100 })
-  assert.equal(idx.stats().digests, 17)
-  assert.equal(idx.stats().stages.implement, 16)
+  assert.equal(idx.stats().digests, cap + 1)
+  assert.equal(idx.stats().stages.implement, cap)
   assert.equal(idx.stats().stages.worker, 1)
 })
 
@@ -1023,4 +1035,39 @@ test('isDecisionStageEnabled respects the configured stage list', () => {
   assert.equal(isDecisionStageEnabled(['guard'], 'worker'), false)
   assert.equal(isDecisionStageEnabled(undefined, 'guard'), false)
   assert.deepEqual(DECISION_STAGES, ['guard', 'escalate', 'worker', 'consult'])
+})
+
+// ---- smart mode child routing ---------------------------------------------
+
+test('smart mode: the main agent plans, children execute on the weak tier', () => {
+  const tiers = ['strong', 'cheap']
+  // Main agent: the caller pins it to the plan tier itself; the pure spec only
+  // says a non-child has no smart routing decision.
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: false, planActive: true, tiers }), null)
+  // A child under an inherited policy is execution work: weak tier, even in
+  // plan mode.
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: true, subagentPolicy: 'inherit', planActive: true, tiers }), 'cheap')
+  assert.equal(resolveTierSpec({ sessionMode: 'smart', isChild: true, subagentPolicy: 'inherit', planActive: false, tiers }), 'cheap')
+  // An explicit per-kind policy still outranks the smart default.
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: true, subagentPolicy: 'strong', planActive: true, tiers }), 'strong')
+  // Three tiers: the weak tier is cheap, not main.
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: true, subagentPolicy: 'inherit', planActive: true, tiers: ['strong', 'main', 'cheap'] }), 'cheap')
+})
+
+test('escalation and explicit pins still outrank the smart child default', () => {
+  const tiers = ['strong', 'cheap']
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: true, escalated: true, subagentPolicy: 'inherit', tiers }), 'strong')
+  assert.equal(resolveTierSpec({ mode: 'smart', isChild: true, explicitTier: 'cheap', subagentPolicy: 'inherit', tiers }), 'cheap')
+})
+
+test('a pin or session mode of an inactive tier keeps the seed instead of downgrading', () => {
+  const two = ['strong', 'cheap']
+  const three = ['strong', 'main', 'cheap']
+  assert.equal(resolveTierSpec({ explicitTier: 'main', mode: 'auto', tiers: two }), null, 'main is not active: no decision')
+  assert.equal(resolveTierSpec({ sessionMode: 'main', mode: 'auto', tiers: two }), null)
+  assert.equal(resolveTierSpec({ explicitTier: 'main', mode: 'auto', tiers: three }), 'main')
+  assert.equal(resolveTierSpec({ sessionMode: 'main', mode: 'auto', tiers: three }), 'main')
+  // A mode keyword is not a tier name and must keep working.
+  assert.equal(resolveTierSpec({ sessionMode: 'auto', mode: 'auto', planActive: false, tiers: two }), 'cheap')
+  assert.equal(resolveTierSpec({ sessionMode: 'off', mode: 'auto', tiers: two }), null)
 })

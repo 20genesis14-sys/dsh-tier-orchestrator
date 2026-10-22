@@ -27,9 +27,14 @@ const react = {
     const cell = react.__cell || (react.__cell = { value })
     return [cell.value, (next) => { cell.value = typeof next === 'function' ? next(cell.value) : next }]
   },
-  useEffect: () => {},
+  // Effects are recorded, not run: a test asserts what a component *would*
+  // re-read (dependencies), without a React scheduler.
+  useEffect: (fn, deps) => {
+    ;(react.__effects || (react.__effects = [])).push({ fn, deps })
+  },
   __cell: null,
-  __reset() { react.__cell = null },
+  __effects: null,
+  __reset() { react.__cell = null; react.__effects = null },
 }
 const stubs = { react, '@deepseek-ai/dsh-client-ui-primitives': primitives }
 
@@ -764,5 +769,35 @@ test('a decision model that the catalog does not list is kept', () => {
 
 test('the client stage list matches the core stage list', () => {
   assert.deepEqual(client.DECISION_STAGES, CORE_DECISION_STAGES)
+})
+
+test('the decision catalog re-reads when the endpoint settings change', () => {
+  const loaded = []
+  const render = (baseUrl) => {
+    react.__reset()
+    client.TierRoutingCard({
+      t: (key) => key,
+      view: 'edit',
+      useTierRoutingCard: (select) => select({
+        writable: true,
+        decisionBaseUrl: { text: baseUrl },
+        decisionCatalogPath: { text: '/api/v1/models' },
+        decisionCatalogQuery: { text: 'output_modalities=decisions' },
+      }),
+      useModelCatalog: (select) => select({ status: 'ready', view: client.catalogView(sampleCatalog), error: null }),
+      useDecisionCatalog: (select) => select({ status: 'idle', view: client.decisionCatalogView(undefined), error: null, url: '' }),
+      loadCatalog() {}, refreshCatalog() {}, edit() {}, resetField() {}, save() {}, discard() {},
+      loadDecisionCatalog: (config) => loaded.push(config),
+    })
+    return react.__effects || []
+  }
+  const first = render('https://one.local')
+  const second = render('https://two.local')
+  const depOf = (effects) => effects.find((e) => Array.isArray(e.deps) && e.deps.includes('https://one.local') || (Array.isArray(e.deps) && e.deps.includes('https://two.local')))
+  const a = depOf(first)
+  const b = depOf(second)
+  assert.ok(a && b, 'the decision-catalog effect declares the endpoint as a dependency')
+  assert.notDeepEqual(a.deps, b.deps, 'a changed endpoint re-runs the effect')
+  assert.equal(b.deps[1], 'https://two.local')
 })
 

@@ -181,7 +181,7 @@ sequenceDiagram
   searches it for snippets and injects them into the prompt. `/tier cache
   status|clear|search <query>`.
 - **Digest cards + stable prefixes (v0.8.1)**: each completed sidekick stage writes a
-  memory card (diffSummary/checks/issues, capped 8 per stage) that later calls of the
+  memory card (diffSummary/checks/issues, capped 16 per stage) that later calls of the
   same stage inject as `Previous outcomes (memory):`. Prompt assembly uses a fixed
   per-stage preamble, so repeated calls share a byte-identical prefix for provider-side
   prompt-cache reuse. Snippet search scopes to `paths[]` (`k` raised to 8) and matches
@@ -289,7 +289,7 @@ session creation; existing sessions keep theirs (DSH behavior).
 /tier auto                                  # restore auto for this session (plan -> strong, execution -> cheap)
 /tier delegated                             # keep the main session on the model picker; tier only subagents
 /tier smart                                 # pin the main agent to the plan tier; file edits go through tier_sidekick
-/tier cache <status|clear|search <query>>   # inspect/clear the TurboQuant snippet cache or query it
+/tier cache <status|clear|search <query>|invalidate <path>|export [file|--inline|<stage>]|gc>   # inspect, query, clear or persist the TurboQuant cache; gc drops entries whose file is gone
 /tier off                                   # disable routing for this session, restore its default model (other sessions unaffected)
 /tier plan                                  # enter plan mode and route the plan to the plan tier; smart/auto/explicit tiers are kept, off/delegated switch to auto
 /tier models                                # list registered providers and their models
@@ -397,6 +397,11 @@ DSH imports or I/O (unit-testable); `lib/dsh/` contains the only harness-facing
 adapters (service probe, routing seam strategies, subagent/jobs adapters, the
 settings bridge). A DSH breaking change should be fixable inside one `lib/dsh/`
 file — that is the compatibility boundary by design.
+
+Review notes: [`docs/REVIEW.md`](docs/REVIEW.md) records each review pass — the
+method, every finding with its disposition, the findings that were rejected and
+why, the behavior changes users may notice, and the known limitations. It is
+the "why" behind the `[Unreleased]` CHANGELOG entries.
 
 Verified in live multi-round sessions (dynamic-plugin form):
 

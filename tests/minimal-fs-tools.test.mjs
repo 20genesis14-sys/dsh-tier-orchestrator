@@ -185,3 +185,17 @@ test('without a policy service the mutation keeps the backend default', async ()
   assert.equal(calls.length, 1)
   assert.equal(calls[0], undefined)
 })
+
+test('a throwing policy resolver falls back to the backend default', async () => {
+  const calls = []
+  const fs = {
+    async resolve(path) { return { path } },
+    async readText() { return SRC },
+    async writeText(target, content, expected, signal, policy) { calls.push(policy) },
+  }
+  const sandboxPolicy = { resolve() { throw new Error('inactive fiber') } }
+  const tools = createMinimalFsTools({ fs, getCwd: () => undefined, sandboxPolicy })
+  await tools[1].execute({ path: 'x.txt', content: 'new' }, { signal: undefined })
+  assert.equal(calls.length, 1, 'the write still happens')
+  assert.equal(calls[0], undefined, 'the backend default applies')
+})

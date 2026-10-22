@@ -133,7 +133,7 @@ sequenceDiagram
   每轮预算、响应缓存（相同状态 60s 复用）与阈值（`approveAt`/`blockAt`）均可配置；
   无 key / 出错时回落到确定性策略。永不进入每请求热路径。
 - **Digest 卡片 + 稳定前缀（v0.8.1）**：每个完成的 sidekick 阶段写入记忆卡片
-   （diffSummary/checks/issues，每阶段上限 8），同阶段后续调用会作为
+   （diffSummary/checks/issues，每阶段上限 16），同阶段后续调用会作为
    `Previous outcomes (memory):` 注入。提示词使用固定的阶段前缀组装，使重复调用
    共享逐字节相同的前缀，利于 provider 端提示词缓存复用。片段检索会按 `paths[]`
    限定范围（`k` 提升至 8）并使用更宽松的匹配阈值。
@@ -223,7 +223,7 @@ status、sidekick 工具只在 standard 预设存在。被排除的能力并未�
 /tier auto                                  # 本会话恢复自动（计划模式→强档，执行→弱档）
 /tier delegated                             # 主会话保持模型选择器，仅对子代理分层
 /tier smart                                 # 主代理固定在规划档；文件修改交给 tier_sidekick
-/tier cache <status|clear|search <query>>   # 查看/清空 TurboQuant 片段缓存或按查询检索
+/tier cache <status|clear|search <query>|invalidate <path>|export [file|--inline|<stage>]|gc>   # 查看/检索/清空/持久化 TurboQuant 缓存；gc 删除源文件已不存在的条目
 /tier off                                   # 本会话关闭路由并恢复默认模型（不影响其他会话）
 /tier plan                                  # 进入计划模式并把计划请求路由到规划档；smart/auto/显式档位保持不变，off/delegated 切到 auto
 /tier models                                # 列出已注册 provider 与其模型

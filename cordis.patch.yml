@@ -18,7 +18,6 @@
         strongProvider: deepseek-official
         strongModel: deepseek-v4-pro
         strongEffort: max
-        strongFollowSession: true
         strongFallback:
           - provider: deepseek-official
             model: deepseek-v4-pro
@@ -26,7 +25,6 @@
         cheapProvider: deepseek-official
         cheapModel: deepseek-v4-flash
         cheapEffort: low
-        cheapFollowSession: false
         cheapFallback: []
         subagentPolicy: inherit
         promptProfile: standard

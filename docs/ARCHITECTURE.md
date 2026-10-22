@@ -115,11 +115,13 @@ strings — agents are GC'd with their sessions):
 | --- | --- | --- | --- |
 | `sessionModes` | `'auto'|'strong'|'cheap'|'delegated'|'off'` | `applyRoute` (`tier_route`, `/tier`) | `effectiveMode`, `tierNameFor` |
 | `sessionBaselines` | `{provider,model,reasoningEffort}` | `captureBaseline` (first request/inbox/route call) | `off`/`delegated` restore, `resolveRoute` |
-| `childTiers` | tier name | `tier_worker` after spawn (`agents.get(childId)`) | `tierNameFor` (explicitTier) |
+| `childTiers` | tier name | `tier_worker` after spawn (`agents.get(childId)`), or claimed from a pre-spawn announcement | `tierNameFor` (explicitTier) |
+| `childRouteTiers` | tier name (worker) or the seeded route (sidekick) | `tier_worker`, `tier_sidekick` | `effectiveExecutionTier` — the guard classifies a keep-seed child by the route it actually sends, never as "strong" |
+| `pendingChildPins` (array, bounded, 60s) | `{parentId, provider, model, tierName}` | `announceChildPin` before the spawn | `takePendingPin` on the child's first request (the spawn race) |
 | `escalations` | `{count, windowStart, until}` | `agent/error` handler | `isEscalated` |
 | `fallbackStates` | `{index, until, tierName}` | `agent/request-error` handler | `activeFallbackTarget` |
 | `cheapEfforts` | `{effort, until}` | `raiseCheapEffort` | `currentCheapEffort` |
-| `planStates` (keyed on **session**) | `boolean` | `session/event` listener (`plan/mode`), `setPlanMode` | `planActive` — the real `Session` has no public `.events`, so we fold the stream ourselves; `session.events` is only a compat fallback |
+| `planStates` (keyed on **session**) | `boolean` | `session/event` listener (`plan/mode`), `setPlanMode`, and a one-time fold of `session.ownEvents()` on the first read for a resumed session | `planActive` — the real `Session` has no public `.events`, so we fold the stream ourselves; `session.events` is only a compat fallback (re-folded per read, never cached, because a mock/legacy array is mutable) |
 
 Global mutable state lives in one `state` object: `mode` (global default),
 `subagentPolicy`, thresholds/TTLs, and `state.tiers` (the registry snapshot).
@@ -196,8 +198,11 @@ consult flags instead of assuming APIs:
 - No `startActivation` but legacy `start` → adapter picks the old path.
 - No `jobs` → `background` worker reports the feature missing.
 - `OPTIONAL_SEAMS` (`subagentsLegacy`, `subagentsActivation`,
-  `presetRegister`) don't count as "missing" in the status line; subagents as
-  a whole are flagged only when *neither* API exists.
+  `presetRegister`, `approvalRequest`, `fsResolve`, `fsReadText`,
+  `fsWriteText`, `fsEditText`, `fsStat`, `sandboxPolicy`) don't count as
+  "missing" in the status line; subagents as a whole are flagged only when
+  *neither* API exists. A probed seam that no feature reads is a bug: it
+  reports a false degradation, so every entry here has a consumer.
 
 `/tier status` prints `routing seam: waterfall|header` and `seams: all ok` or
 the missing list — the first thing to check when debugging on a new DSH build.
@@ -251,6 +256,17 @@ npm run check      # syntax check every lib file
 npm pack --dry-run # tarball contents
 ```
 
+| File | What it covers |
+| --- | --- |
+| `tests/pure.test.mjs` | `core/` only, no mocks (routing specs, guard patterns, escalation, decision parsing, TurboQuant) |
+| `tests/smoke.test.mjs` | the whole plugin on a mocked ctx: every tool, command, listener, persistence path |
+| `tests/routing-seam.test.mjs` | both routing strategies against plain fakes (waterfall replacement, legacy `request/header`) |
+| `tests/decisions.test.mjs` | decision transport with an injected `fetch` (thresholds, cache/peek/bound, failures) |
+| `tests/vec-cache.test.mjs` | cache persistence, trimming, export, stale-file sweep |
+| `tests/minimal-fs-tools.test.mjs` | Pi-style read/write/edit semantics |
+| `tests/client.test.mjs` | the browser half under Node with stubbed `react`/primitives |
+| `tests/packaging.test.mjs` | manifest/patch integrity |
+
 The smoke suite's `makeContext()` mock mirrors the real 0.2.1 service shapes
 (`settings.describe/update`, `startActivation`, `jobs.start(owner:SessionId)`,
 the `agent/request` waterfall via `runRequest`). When DSH changes a contract,
@@ -267,8 +283,24 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
 - `mode: 'smart'` is a session/global mode. `tierNameFor` short-circuits the
   Main Agent (`!isChildAgent`) to the plan tier (`main` in three tiers, `strong`
   otherwise) regardless of plan state; failure escalation still outranks it.
+- Smart mode delegates *execution*, so a child under an inherited subagent
+  policy runs on the weak tier (`resolveTierSpec`), never on the planning tier.
 - The `tools/pre-execute` guard denies `write`/`edit`/`multi_edit`/`patch` for
   the Main Agent in smart mode, pointing at `tier_sidekick`.
+- The guard's tier for a child is the **weakest** of: the route its current
+  step actually carries (the tool call came from that model, even when a
+  waterfall resolve failed and the seed was used), the tier recorded at spawn
+  (`childRouteTiers`, which covers the window before the first routed
+  request), and the tier the policy would pick. An unknown route fails safe to
+  the weak tier. A stronger intent therefore never vouches for a step that may
+  run on the weak tier — treating a keep-seed child as "strong" used to
+  disable the guard for the very sidekick that edits code on the cheap model.
+- A `tier_worker` pin announced before the spawn (`pendingChildPins`, bounded
+  to 16, 5-minute TTL) is claimed by the child's first request whose seed
+  matches the announced route; a failed spawn withdraws it. The pin is only a
+  claim ticket — the durable record is the `childTiers` WeakMap, which a
+  resumed child (a new agent object) no longer has, so it falls back to the
+  policy (documented limitation, not a routing hazard: the seed is preserved).
 
 ### Sidekicks
 
@@ -279,6 +311,11 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
   `resolveSidekickTarget(stage, state)` (stage override or cheap tier). The
   child is recorded in the `childKeepSeed` WeakMap; `childRouteSource` returns
   `'keep'` for it, so the waterfall preserves the seeded stage model verbatim.
+- Because that seed is preserved verbatim, the route never passes the child's
+  own request router: the tool fits its effort through `reconcileTarget`
+  before spawning (an undeclared level would otherwise reach the provider as
+  `UNSUPPORTED_REASONING_EFFORT`) and refuses an unregistered stage provider
+  with a message that names `/tier set sidekick-<stage>`.
 - Explore results are upserted into the TurboQuant cache; implement/fix results
   invalidate touched paths and index the change summary.
 
@@ -335,7 +372,7 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
 - **Digest cards.** `createTurboQuantIndex().upsertDigest({stage, area,
   diffSummary, checks, issues})` stores a `kind:'digest'` entry keyed
   internally as `digest::<stage>::<area>` (path = canonical area). Cards are
-  capped per stage (8, oldest evicted) and are skipped by
+  capped per stage (`DIGEST_MAX_PER_STAGE`, 16, oldest evicted) and are skipped by
   `invalidateByPath` — a card describes a result, not a file, so file
   rewrites never remove them.
 - **Stable prefixes.** Each sidekick stage has a fixed `STAGE_PREAMBLES`
@@ -498,8 +535,15 @@ below the block threshold.
   explicit full `approve`; guard approval requires every noul proposition ≥
   `approveAt`.
 - Per-agent per-turn budget (`decisionTurnCalls`, reset on user messages)
-  mirrors the advisor budget; cached identical states do not consume network
-  or budget beyond the first call.
+  mirrors the advisor budget and counts real calls only. A state that a
+  previous call already answered is served through `client.peek()` (no
+  network) and does not spend the budget, even after it is exhausted; the
+  response cache itself is bounded (`maxCacheEntries`, 256) and drops its
+  oldest entries, so a long session cannot grow it without limit.
+- A host that masks secrets in `settings.describe()` cannot corrupt the
+  profile: `isMaskedSecret` (the server twin of the browser check) keeps a
+  masked value out of `state`, so a later persist writes the old key, not the
+  mask.
 - Strict parsing: out-of-range probability, unknown choice option, missing
   answer, or non-JSON response is an error, never a silent "approved".
 - A `choice` answer that carries no `confidence` is read from its
@@ -510,3 +554,13 @@ below the block threshold.
   number in [0, 1]: a string, a boolean or a value out of range counts as no
   probability, never as an approval.
 - Never on the per-request hot path (`agent/request` is untouched).
+
+## 14. Review log
+
+`docs/REVIEW.md` records how a review pass is run (contract diff against the
+pinned `.d.ts`, coverage-driven gap hunt, mock probes, the dogfooded
+`tier_review` and its limits), every finding with its disposition, the
+behavior changes users may notice, the findings that were rejected and why, and
+the known limitations that were documented instead of fixed. Read it together
+with the `[Unreleased]` CHANGELOG section: the CHANGELOG says what changed,
+the review log says why and how to verify it again.

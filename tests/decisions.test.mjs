@@ -108,3 +108,43 @@ test('request timeouts abort and fail closed', async () => {
   assert.equal(out.ok, false)
   assert.equal(out.outcome, 'unknown')
 })
+
+test('status reports a plain endpoint string and the cache bound', () => {
+  const client = createDecisionClient({ model: 'm', baseUrl: 'https://host.local/', path: 'alpha/decisions', maxCacheEntries: 4 })
+  const st = client.status()
+  assert.equal(typeof st.endpoint, 'string')
+  assert.equal(st.endpoint, 'https://host.local/alpha/decisions')
+  assert.equal(st.maxCacheEntries, 4)
+  assert.equal(st.cacheEntries, 0)
+})
+
+test('peek replays a cached answer without touching the network', async () => {
+  let calls = 0
+  const client = createDecisionClient({
+    model: 'm',
+    fetchImpl: async () => { calls += 1; return { ok: true, status: 200, json: async () => ({ answers: { safe: { type: 'noul', noul: 0.95 } } }) } },
+  })
+  assert.equal(client.peek(Q, { tier: 'cheap' }), null, 'nothing cached yet')
+  assert.equal(calls, 0)
+  const first = await client.ask(Q, { tier: 'cheap' })
+  assert.equal(first.cached, false)
+  const replay = client.peek(Q, { tier: 'cheap' })
+  assert.equal(replay.cached, true)
+  assert.equal(replay.outcome, 'approve')
+  assert.equal(calls, 1, 'peek never issues a request')
+})
+
+test('the response cache stays bounded and drops the oldest entry', async () => {
+  let calls = 0
+  const client = createDecisionClient({
+    model: 'm',
+    maxCacheEntries: 3,
+    fetchImpl: async () => { calls += 1; return { ok: true, status: 200, json: async () => ({ answers: { safe: { type: 'noul', noul: 0.95 } } }) } },
+  })
+  for (let i = 0; i < 6; i++) await client.ask(Q, { i })
+  assert.equal(client.status().cacheEntries, 3, 'the cache never exceeds its bound')
+  assert.equal(calls, 6)
+  // The oldest states were evicted, the newest replay.
+  assert.equal(client.peek(Q, { i: 5 }).cached, true)
+  assert.equal(client.peek(Q, { i: 0 }), null)
+})

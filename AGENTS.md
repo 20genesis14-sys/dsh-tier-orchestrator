@@ -29,8 +29,12 @@ Node `^22.19 || >=24`. No build step — plain ESM (`"type": "module"`).
    settings page, profile persistence) and `plane: 'agent'` (the preset row
    that mounts tools/commands/listeners). `apply()` gates on it.
 5. State is per-agent via `WeakMap` (`sessionModes`, `escalations`,
-   `fallbackStates`, `cheapEfforts`, `sessionBaselines`, `childTiers`) —
-   do not introduce global maps keyed by session id strings.
+   `fallbackStates`, `cheapEfforts`, `sessionBaselines`, `childTiers`,
+   `childRouteTiers`, `childKeepSeed`, `planGates`, ...) — do not introduce
+   global maps keyed by session id strings. The one deliberate exception is
+   `pendingChildPins`, a bounded, expiring array of spawn announcements that
+   the child's first request claims (it exists because the child can start
+   before the caller resumes).
 6. Don't break the tests' mocked contracts; they mirror the real DSH .d.ts
    shapes. If DSH changes shape, update the adapter AND the mock.
 
@@ -77,6 +81,12 @@ Node `^22.19 || >=24`. No build step — plain ESM (`"type": "module"`).
   { plane: 'agent' })`); mocks live in `makeContext()` and mirror real service
   shapes; `runRequest()` simulates the `agent/request` waterfall.
 - `tests/packaging.test.mjs` — manifest/patch integrity.
+- `tests/routing-seam.test.mjs` — both routing strategies against plain
+  fakes (waterfall replacement, the legacy `request/header` write).
+- `tests/decisions.test.mjs` — the decision-model transport (cache, peek,
+  thresholds, failures) with an injected `fetch`.
+- `tests/client.test.mjs` — the browser half, executed under Node against
+  stubbed `react`/primitives.
 - Keep tests free of `@deepseek-ai/*` imports where possible (they're devDeps;
   `index.js` itself imports `dsh-tools` + `schemastery`).
 
@@ -85,3 +95,7 @@ Node `^22.19 || >=24`. No build step — plain ESM (`"type": "module"`).
 `docs/ARCHITECTURE.md` — full internals guide (data flow, state machines,
 config schema, seam strategy selection, extension recipes). Read it before
 non-trivial work.
+
+`docs/REVIEW.md` — the review log: how a pass is run, every finding with its
+disposition, rejected findings with reasoning, and the known limitations. Read
+it before starting a review or when a behavior looks intentional but odd.

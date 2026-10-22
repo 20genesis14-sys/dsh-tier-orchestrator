@@ -8,6 +8,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { apply } from '../lib/index.js'
+import { createTurboQuantIndex } from '../lib/core/turbovec.js'
+import { CACHE_FILE_NAME } from '../lib/dsh/vec-cache.js'
 
 const SESSION_DEFAULT = { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }
 
@@ -1979,4 +1981,325 @@ test('/tier cache gc reports the missing stat seam', async () => {
   const r = await cmd.handler({ rawInput: 'cache gc', agent: main, signal: undefined })
   assert.equal(r.kind, 'error')
   assert.ok(r.text.includes('gc unavailable'), r.text)
+})
+
+// ---- review fixes: guard tier of keep-seed children -------------------------
+
+test('guard denies high-impact commands from a keep-seed child in smart mode', async () => {
+  // A sidekick implements on the cheap tier and keeps its seed route; the
+  // guard must classify it by that route, not as "strong".
+  const { ctx } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const child = makeAgent('sidekick', 'subagent', { provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+  const denied = await guard({ agent: child, name: 'bash', arguments: { command: 'rm -rf ./build' } }, async () => 'ran')
+  assert.equal(denied.kind, 'deny', 'a cheap sidekick child is fenced')
+  const write = await guard({ agent: child, name: 'write', arguments: { file_path: '.env' } }, async () => 'ran')
+  assert.equal(write.kind, 'deny', 'credential writes are fenced for a cheap sidekick child')
+})
+
+test('guard still allows a child pinned to the strong tier', async () => {
+  const { ctx, services } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const out = await worker.execute({ task: 'hard analysis', tier: 'strong' }, { agent: main, signal: undefined })
+  assert.equal(out.tier, 'strong')
+  const child = services.agents.get(out && 'session-worker-0')
+  const childAgent = child || { id: 'worker', session: { id: 'session-worker-0', header: { origin: 'subagent' } } }
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const allowed = await guard({ agent: childAgent, name: 'bash', arguments: { command: 'rm -rf ./build' } }, async () => 'ran')
+  assert.ok(allowed === undefined || allowed.kind !== 'deny', 'a strong child is not fenced')
+})
+
+test('a child whose route is unknown fails safe to the weak tier', async () => {
+  const { ctx } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  // A child spawned by the built-in subagent tool, seeded with a model that is
+  // not one of our tiers: classify as the weak tier, never as strong.
+  const child = makeAgent('orphan', 'subagent', { provider: 'opencode-go', model: 'other-model' })
+  const denied = await guard({ agent: child, name: 'bash', arguments: { command: 'rm -rf /' } }, async () => 'ran')
+  assert.equal(denied.kind, 'deny')
+})
+
+// ---- review fixes: child route pins survive the spawn race ------------------
+
+test('a tier_worker child request that races the pin still runs on the chosen tier', async () => {
+  const { ctx, services, childAgents } = makeContext()
+  // Dispatch the child's first request *inside* startActivation, before the
+  // tool resumes and pins the tier.
+  const original = services.subagents.startActivation
+  let first = null
+  services.subagents.startActivation = async function (spec) {
+    const activation = await original.call(this, spec)
+    const child = childAgents.get(activation.childId)
+    child.session.header.parentSession = main.session.id
+    const seed = { ...spec.request.agentOptions }
+    first = await runRequest(ctx, child, seed)
+    return activation
+  }
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'hard analysis', tier: 'strong' }, { agent: main, signal: undefined })
+  assert.ok(first, 'the child request ran')
+  assert.deepEqual({ provider: first.provider, model: first.model }, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }, 'the announced pin wins over auto routing')
+})
+
+// ---- review fixes: sidekick route validation and effort fitting -------------
+
+test('tier_sidekick fits an undeclared stage effort before spawning', async () => {
+  const { ctx, services } = makeContext({
+    modelInfo: async (provider, model) => (provider === 'cctq'
+      ? { provider, id: model, name: model, reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }
+      : undefined),
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'implement', task: 'write the parser' }, { agent: main, signal: undefined })
+  const spawn = services.subagents.started.at(-1)
+  assert.equal(spawn.request.agentOptions.reasoningEffort, 'low', 'medium was fitted to the declared low')
+})
+
+test('tier_sidekick refuses an unregistered stage provider with a clear message', async () => {
+  const { ctx, services } = makeContext()
+  const original = services.settings.describe
+  services.settings.describe = () => [{
+    ns: 'tier-routing',
+    value: { ...original()[0].value, sidekickFixProvider: 'ghost-provider', sidekickFixModel: 'ghost-1', sidekickFixEffort: 'high' },
+  }]
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await assert.rejects(
+    () => sk.execute({ stage: 'fix', task: 'fix it' }, { agent: main, signal: undefined }),
+    /not registered.*sidekick-fix/,
+  )
+})
+
+// ---- review fixes: plan state survives a reopened session -------------------
+
+test('a resumed plan session keeps planning on the plan tier', async () => {
+  const { ctx } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  // The plan/mode event happened before this plugin instance mounted: only the
+  // durable log carries it.
+  main.session.ownEvents = () => [{ type: 'plan/mode', data: { active: true } }]
+  const req = await runRequest(ctx, main)
+  assert.equal(req.model, 'deepseek-v4-pro', 'plan mode is folded from the session log')
+})
+
+// ---- review fixes: a masked secret never reaches the profile ----------------
+
+test('a host-masked decision API key is never written back', async () => {
+  const { ctx, services } = makeContext()
+  const original = services.settings.describe
+  services.settings.describe = () => [{
+    ns: 'tier-routing',
+    value: { ...original()[0].value, decisionModel: 'jev-1.5', decisionApiKey: '***' },
+  }]
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'set strong deepseek-official deepseek-v4-pro max', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  const patch = services.settings.updates.at(-1).patch
+  assert.equal(patch.decisionApiKey, '', 'the mask is not persisted as the key')
+})
+
+// ---- review fixes: stored per-kind policy survives an inactive layout -------
+
+test('a stored spawn policy survives while its layout is off', async () => {
+  const { ctx, services } = makeContext()
+  const original = services.settings.describe
+  services.settings.describe = () => [{
+    ns: 'tier-routing',
+    value: { ...original()[0].value, spawnPolicy: 'main' },
+  }]
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'layout two', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.equal(services.settings.updates.at(-1).patch.spawnPolicy, 'main', 'the inactive policy is not erased')
+  const set = await cmd.handler({ rawInput: 'subagent spawn main', agent: main, signal: undefined })
+  assert.equal(set.kind, 'error', 'an explicit command still refuses it right now')
+  assert.ok(set.text.includes('three-tier'), set.text)
+})
+
+// ---- review fixes: a mutation never races the cache import -----------------
+
+test('a cache write right after the import is not lost to the load', async () => {
+  const seedIndex = createTurboQuantIndex({ dim: 512 })
+  seedIndex.upsert({ id: 'seed', path: 'src/seed.ts', lines: '1-9', snippet: 'seed snippet' })
+  const seedState = JSON.stringify(seedIndex.exportState())
+  const { ctx, services } = makeContext({ fs: { files: [[CACHE_FILE_NAME, seedState]] }, workerResult: WORKER_REPORT })
+  const slowPath = CACHE_FILE_NAME
+  const readText = services.fs.readText.bind(services.fs)
+  services.fs.readText = async (target) => {
+    if (target && target.displayPath === slowPath) await new Promise((resolve) => setTimeout(resolve, 20))
+    return readText(target)
+  }
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement parseRequest body validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(st.kind, 'success', st.text)
+  assert.ok(st.text.includes('snippets=2'), 'the imported entry and the new write both survive: ' + st.text)
+})
+
+// ---- review fixes: a replayed decision does not spend the budget -----------
+
+test('a replayed decision answer does not consume the per-turn budget', async () => {
+  const pf = patchFetch(noulAnswers(0.99))
+  try {
+    const { ctx, services } = makeContext()
+    withDecisionSettings(ctx, { ...DECISION_CFG, decisionStages: ['guard'], decisionBudgetPerTurn: 1 })
+    applyAgent(ctx)
+    const main = makeAgent('main')
+    const route = services.tools.registered.find((t) => t.name === 'tier_route')
+    await route.execute({ tier: 'cheap' }, { agent: main, signal: undefined })
+    const guard = ctx.listeners['tools/pre-execute'][0]
+    const exec = { agent: main, name: 'bash', arguments: { command: 'rm -rf /tmp/x' } }
+    assert.equal(await guard(exec, async () => 'ok'), 'ok', 'first call spends the budget and approves')
+    assert.equal(await guard(exec, async () => 'ok'), 'ok', 'the identical state replays without network')
+    assert.equal(pf.calls.length, 1, 'only one request was made')
+    const status = services.tools.registered.find((t) => t.name === 'tier_status')
+    const out = await status.execute({}, { agent: main, signal: undefined })
+    assert.ok(out.status.includes('decisionCalls=1'), out.status)
+    assert.ok(out.status.includes('decisionBudgetDenies=0'), 'the replay is not a budget denial: ' + out.status)
+    assert.ok(out.status.includes('decisionHits=1'), out.status)
+  } finally { pf.restore() }
+})
+
+// ---- review fixes: /advisor command and legacy subagents --------------------
+
+test('/advisor asks the strong route and reports it', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const advisor = services.commands.registered.find((c) => c.name === 'advisor')
+  const r = await advisor.handler({ rawInput: 'which layout?', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(r.text.includes('Advisor (deepseek-official/deepseek-v4-pro):'), r.text)
+  assert.ok(r.text.includes('MOCK ADVICE'), r.text)
+  const empty = await advisor.handler({ rawInput: '   ', agent: main, signal: undefined })
+  assert.ok(empty.text.includes('seams:'), 'empty input prints the status instead')
+})
+
+test('the legacy subagents API still runs a worker', async () => {
+  const { ctx, services } = makeContext()
+  const legacy = {
+    list: () => ['spawn'],
+    started: [],
+    async start(provider, request) {
+      this.started.push({ provider, request })
+      const localAgent = makeAgent('legacy-worker', 'subagent')
+      return { localAgent, result: Promise.resolve({ output: [{ type: 'text', text: 'legacy-ok' }] }), dispose: async () => {} }
+    },
+  }
+  services.subagents = legacy
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const out = await worker.execute({ task: 'legacy run' }, { agent: main, signal: undefined })
+  assert.equal(out.output, 'legacy-ok')
+  assert.equal(legacy.started.length, 1)
+  assert.equal(legacy.started[0].provider, 'spawn')
+  assert.equal(legacy.started[0].request.label.length > 0, true)
+})
+
+test('/tier gate sets the plan gate values and rejects garbage', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const explore = await cmd.handler({ rawInput: 'gate explore 3', agent: main, signal: undefined })
+  assert.equal(explore.kind, 'success', explore.text)
+  assert.equal(services.settings.updates.at(-1).patch.planMinExplore, 3)
+  const advisor = await cmd.handler({ rawInput: 'gate advisor off', agent: main, signal: undefined })
+  assert.equal(advisor.kind, 'success', advisor.text)
+  assert.equal(services.settings.updates.at(-1).patch.planAdvisorGate, false)
+  const limit = await cmd.handler({ rawInput: 'gate advisor-limit 2 15', agent: main, signal: undefined })
+  assert.equal(limit.kind, 'success', limit.text)
+  assert.equal(services.settings.updates.at(-1).patch.advisorMaxCallsPerTurn, 2)
+  assert.equal(services.settings.updates.at(-1).patch.advisorConfirmTimeoutSec, 15)
+  const bad = await cmd.handler({ rawInput: 'gate explore -1', agent: main, signal: undefined })
+  assert.equal(bad.kind, 'error', bad.text)
+  assert.ok(bad.text.includes('usage:'), bad.text)
+})
+
+// ---- review pass 2: guard precedence, pin lifecycle, cap, path filter -------
+
+test('the guard classifies a child by the route its request actually carried', async () => {
+  const { ctx, services } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const out = await worker.execute({ task: 'hard analysis', tier: 'strong' }, { agent: main, signal: undefined })
+  assert.equal(out.tier, 'strong')
+  const child = services.agents.get('session-worker-0')
+  assert.ok(child, 'the spawned child is known')
+  // The child was pinned to strong, but the request it actually carries is
+  // the cheap route (a failed routing pass keeps the seed): the guard must
+  // follow the route, not the pin.
+  child.options = { provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' }
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const denied = await guard({ agent: child, name: 'bash', arguments: { command: 'rm -rf ./build' } }, async () => 'ran')
+  assert.equal(denied.kind, 'deny')
+})
+
+test('a failed spawn withdraws its announced tier pin', async () => {
+  const { ctx, services } = makeContext()
+  const original = services.subagents.startActivation
+  let calls = 0
+  services.subagents.startActivation = async function (spec) {
+    calls += 1
+    if (calls === 1) throw new Error('spawn refused')
+    return original.call(this, spec)
+  }
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await assert.rejects(() => worker.execute({ task: 'x', tier: 'strong' }, { agent: main, signal: undefined }), /spawn refused/)
+  // A later child of the same parent seeded with the same route must not
+  // inherit the dead pin: auto routing applies (cheap), not strong.
+  const orphan = makeAgent('orphan', 'subagent', { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  orphan.session.header.parentSession = main.session.id
+  const req = await runRequest(ctx, orphan, { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  assert.equal(req.model, 'gpt-5.6-terra', 'the withdrawn pin no longer pins the child to strong')
+})
+
+test('capped without a reachable parent runs on the cap tier', async () => {
+  const { ctx, services } = makeContext({ mode: 'delegated' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const r = await cmd.handler({ rawInput: 'subagent capped', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  const child = makeAgent('capped-child', 'subagent', { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  child.session.header.parentSession = 'session-that-is-gone'
+  child.session.ownEvents = () => [{ type: 'plan/mode', data: { active: true } }]
+  const req = await runRequest(ctx, child, { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+  assert.equal(req.model, 'gpt-5.6-terra', 'the cap (cheap) holds even without the parent route')
+})
+
+test('a touched path that climbs out of the project is not remembered', async () => {
+  const escape = process.cwd().replace(/\\/g, '/') + '/../outside/evil.ts'
+  const report = ['Touched files:', '- src/parser.ts', '- ' + escape, 'Diff summary: change', 'Checks: ok'].join('\n')
+  const { ctx, services } = makeContext({ workerResult: report, fs: { files: [] } })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'implement validation in src/parser.ts' }, { agent: main, signal: undefined })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const st = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.ok(st.text.includes('snippets=1'), 'only the in-project path is indexed: ' + st.text)
+  const search = await cmd.handler({ rawInput: 'cache search evil', agent: main, signal: undefined })
+  assert.ok(!search.text.includes('evil.ts'), 'the escaping path is not in the cache')
 })

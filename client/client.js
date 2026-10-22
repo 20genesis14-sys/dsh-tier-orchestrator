@@ -1162,11 +1162,15 @@ function TierRoutingCard(props) {
   useEffect(() => {
     if (props.view !== 'summary') loadCatalog()
   }, [])
+  // The catalog follows the endpoint the user configured: a changed base URL,
+  // path or query re-reads it (a settings update alone would refresh the stale
+  // config the catalog was last opened with).
+  const decisionConfig = decisionCatalogConfig(state)
   useEffect(() => {
     if (props.view !== 'summary' && props.loadDecisionCatalog) {
-      props.loadDecisionCatalog(decisionCatalogConfig(state))
+      props.loadDecisionCatalog({ baseUrl: decisionConfig.baseUrl, path: decisionConfig.path, query: decisionConfig.query })
     }
-  }, [props.view])
+  }, [props.view, decisionConfig.baseUrl, decisionConfig.path, decisionConfig.query])
   if (props.view === 'summary') return t('description')
   const disabled = !state.writable
   const common = { t, state, catalog, decisionCatalog, disabled, edit: props.edit, resetField: props.resetField }

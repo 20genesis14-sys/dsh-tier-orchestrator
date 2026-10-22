@@ -4,6 +4,97 @@ All notable changes to dsh-tier-orchestrator are documented here.
 
 ## [Unreleased]
 
+### Fixed (code review pass)
+
+The full pass log — method, every finding with its disposition, rejected
+findings with reasoning, behavior changes and known limitations — is in
+[`docs/REVIEW.md`](docs/REVIEW.md).
+
+- **The guard no longer exempts a cheap-tier child.** `effectiveExecutionTier`
+  classified any child without a tier pin as `strong`, so a `tier_sidekick`
+  (keep-seed) child — the agent that writes code on the cheap model — passed
+  every high-impact check. A child is now classified by the weakest of three
+  routes it could be executing on (the route its current step actually
+  carried, the tier recorded at spawn, the policy tier), and an unknown route
+  fails safe to the weak tier. A child that is actually on `strong` (pin,
+  escalation, or a strong session) stays unguarded.
+- **`tier_sidekick` fits the stage effort and validates the stage provider.**
+  The stage route is seeded verbatim into the child, so nothing downstream
+  corrected an undeclared reasoning level; it is now fitted through
+  `reconcileReasoningEffort` before the spawn. An unregistered stage provider
+  is refused with a message naming `/tier set sidekick-<stage>` instead of
+  failing inside the spawn.
+- **A child's tier pin survives the spawn race.** The pin is announced before
+  `startActivation` and claimed by the child's first request, so a
+  `tier_worker` on `strong` can no longer start its first step on `cheap`.
+- **Plan mode survives a reopened session.** A plan/mode event that happened
+  before this plugin instance mounted is folded once from
+  `session.ownEvents()`, so a resumed plan session keeps planning on the plan
+  tier instead of dropping to `cheap`.
+- **An undeclared effort now resolves to the nearest declared level.** The
+  substitution used to fall to the model's floor, so a strong tier asking for
+  `max` on a model declaring `low|medium|high` silently ran at `low`. It now
+  takes the highest declared level at or below the request (`high`), never
+  invents a level above it, and still prefers the adapter's `defaultEffort`.
+- **An explicit pin of an inactive tier keeps the seed.** An `explicitTier` or
+  session mode naming `main` under the two-tier layout resolves to no
+  decision instead of falling through to the weak tier.
+- **The header fallback drops a stale effort.** `applyHeaderRoute` now deletes
+  `agent.options.reasoningEffort` when the target route has none, symmetric
+  with the header write (the first/resumed request is built from those
+  options).
+- **A `capped` child with an unreachable parent runs on the cap tier**, not on
+  the planning tier above it.
+- **Touched-path containment is resolved, not assumed.** `normalizePath`
+  collapses `.`/`..` segments and an unknown project root no longer counts as
+  containing every absolute path, so a path that climbs out of the project is
+  not remembered in the cache.
+- **A host-masked decision API key is never written back.** `isMaskedSecret`
+  (the server twin of the browser check) keeps `***`/`REDACTED` out of
+  `state`, so the next `/tier set` cannot persist the mask over the real key.
+- **Decision replays no longer spend the per-turn budget.** A state that a
+  previous call already answered is served by `client.peek()` without network
+  and without consuming the budget, matching the documented behavior; the
+  response cache is now bounded (256 entries, oldest dropped) and
+  `status()` reports a real endpoint string instead of a leaked `url` object.
+- **A cache write cannot be lost to the import.** `ensureVecCache` awaits the
+  persisted state before any caller mutates the index (the import replaces the
+  whole index), and the registry tracks the in-flight import per project root.
+- **The legacy `request/header` seam never appends an undefined effort.**
+  A route whose model declares no reasoning support now omits the field
+  instead of triggering the session append validation and silently dropping
+  the route.
+- **Session paths no longer fall back to `process.cwd()`.** Evidence reads,
+  the second-stage guard's `project`, and the minimal fs tools resolve against
+  the owning session's workspace root; the process directory is used only as
+  the last resort for the cache location.
+- **Stored subagent policies survive an inactive layout.** `spawnPolicy` /
+  `forkPolicy` keep a valid-but-inactive `main` instead of erasing it on the
+  next persist; an explicit `/tier subagent` command still refuses it with the
+  layout explanation.
+- **Behavior change: smart mode gives children the weak tier.** An inherited
+  subagent policy in smart mode now resolves to the weak tier (smart mode
+  delegates execution) instead of leaving the child on its seed — a child of a
+  smart session may therefore run on a cheaper model than before. An explicit
+  per-kind policy still wins, and escalation still outranks both.
+- **The decision catalog follows the endpoint settings.** Changing the base
+  URL, path or query in the form re-reads the catalog instead of refreshing
+  the config it was last opened with.
+- **Docs and config match the code.** Removed the stale
+  `strongFollowSession`/`cheapFollowSession` keys from `cordis.patch.yml`,
+  repaired control characters in the 0.10.1 entry, corrected the per-stage
+  digest cap in README/ARCHITECTURE (16, exported as
+  `DIGEST_MAX_PER_STAGE`), documented `/tier cache
+  invalidate|export|gc` and the current `OPTIONAL_SEAMS`, aligned the
+  `strongFallback` schema default with `DEFAULT_TIER_CONFIG`/docs, and
+  `.gitignore` now covers the exported cache file.
+- **Smaller hygiene fixes.** The unused `defaultModel` seam is gone (it
+  reported a false `missing:` entry), `decisionStageOn` uses the core
+  `isDecisionStageEnabled`, dead exports were removed, `nextEffortStep`
+  understands `off` as the bottom of the ladder, the seven standard-only tool
+  definitions are not built in pi mode, and `minimal-fs-tools` no longer
+  throws when the sandbox policy resolver does.
+
 ### Changed
 
 - **Minimal (`pi`) prompt mode registers only `tier_worker`.** The seven
@@ -73,10 +164,10 @@ All notable changes to dsh-tier-orchestrator are documented here.
 ### Changed
 
 - **Removed follow-session.** Strong/main/cheap tiers are now always driven by the
-  plugin configuration (host 	ier-routing entry, /tier set, 	ier_configure);
-  the DSH session model picker is never consulted for routing. The ollowSession/
+  plugin configuration (host `tier-routing` entry, /tier set, `tier_configure`);
+  the DSH session model picker is never consulted for routing. The `followSession`/
   cheapFollowSession/mainFollowSession volatile fields, the /tier set <strong|main>
-  follow-session form, and the 	ier_configure ollowSession parameter are gone.
+  follow-session form, and the `tier_configure` `followSession` parameter are gone.
   /tier status shows the effective route in smart mode (smart: main agent pinned to
   <tier>; effective route now: ...); the session default line was replaced by a
   note that models come only from plugin config. The advisor/reviewer routes and the

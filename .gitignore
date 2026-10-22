@@ -4,3 +4,6 @@ node_modules/
 .DS_Store
 dist/
 .dsh-turbovec-cache.json
+.dsh-turbovec-cache.export.json
+# local harness/tooling state (session panel, spill files)
+.dsh-ops/
