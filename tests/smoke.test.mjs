@@ -80,6 +80,14 @@ function makeContext(options = {}) {
       list: () => ['spawn'],
       started: [],
       async startActivation(spec) {
+        // Simulate a host that cannot mount an agent preset: the caller must
+        // retry without it rather than lose the child.
+        if (options.presetError && spec.request && spec.request.agentPreset) {
+          const err = options.presetError
+          options.presetError = null
+          this.started.push(spec)
+          throw new Error(err)
+        }
         const localAgent = makeAgent('worker-' + this.started.length, 'subagent')
         childAgents.set(localAgent.session.id, localAgent)
         this.started.push(spec)
@@ -90,6 +98,7 @@ function makeContext(options = {}) {
               ? options.workerResults.shift()
               : (options.workerResult ?? 'worker-ok') }],
             stopReason: 'stop',
+            ...(options.workerStructured !== undefined ? { structured: options.workerStructured } : {}),
           }),
           dispose: async () => {},
         }
@@ -174,7 +183,7 @@ test('apply() registers every surface and mounts the agent/request seam', () => 
   const { ctx, services } = makeContext()
   applyAgent(ctx)
   const names = services.tools.registered.map((t) => t.name).sort()
-  assert.deepEqual(names, ['tier_advisor', 'tier_configure', 'tier_escalate_effort', 'tier_review', 'tier_route', 'tier_sidekick', 'tier_status', 'tier_worker'])
+  assert.deepEqual(names, ['tier_advisor', 'tier_configure', 'tier_escalate_effort', 'tier_recall', 'tier_review', 'tier_route', 'tier_sidekick', 'tier_status', 'tier_worker'])
   assert.deepEqual(services.commands.registered.map((c) => c.name).sort(), ['advisor', 'tier'])
   assert.equal(services.systemPrompt.sections.length, 1)
   assert.equal(services.systemPrompt.sections[0].name, 'tier-routing')
@@ -185,21 +194,22 @@ test('apply() registers every surface and mounts the agent/request seam', () => 
   }
 })
 
-test('minimal pi prompt mode declares only tier_worker', () => {
+test('minimal pi prompt mode declares only tier_worker and tier_recall', () => {
   const { ctx, services } = makeContext()
   apply(ctx, { plane: 'agent', promptMode: 'pi' })
   const names = services.tools.registered.map((t) => t.name).sort()
-  assert.deepEqual(names, ['tier_worker'])
+  assert.deepEqual(names, ['tier_recall', 'tier_worker'])
 })
 
-test('standard prompt mode still declares all eight tier_* tools', () => {
+test('standard prompt mode still declares all nine tier_* tools', () => {
   const { ctx, services } = makeContext()
   apply(ctx, { plane: 'agent', promptMode: 'standard' })
   const names = services.tools.registered.map((t) => t.name).sort()
-  assert.equal(names.length, 8)
+  assert.equal(names.length, 9)
   assert.ok(names.includes('tier_route'))
   assert.ok(names.includes('tier_advisor'))
   assert.ok(names.includes('tier_sidekick'))
+  assert.ok(names.includes('tier_recall'))
   assert.ok(names.includes('tier_worker'))
 })
 
@@ -268,6 +278,26 @@ test('omits reasoningEffort for a route that declares no reasoning support', asy
   const out = await runRequest(ctx, main)
   assert.equal(out.model, 'minimax/minimax-m3.1-flash')
   assert.ok(!('reasoningEffort' in out), 'no effort may ride a model without reasoning metadata')
+})
+
+test('a positive effort never resolves to off on a model that rejects disabled reasoning (minimax free)', async () => {
+  // minimax m3.1 flash free declares off/high/max: it has no "low", and
+  // disabling reasoning fails the request with 400 "Reasoning is mandatory".
+  // The default cheap effort is low, so a positive request must be fitted up
+  // to the model's lowest positive level (high) — never down to off.
+  const { ctx } = makeContext({
+    cheapProvider: 'openrouter',
+    cheapModel: 'minimax/minimax-m3.1-flash:free',
+    cheapEffort: 'low',
+    modelInfo: async (provider, model) => (provider === 'openrouter' && model === 'minimax/minimax-m3.1-flash:free'
+      ? { provider, id: model, name: model, reasoning: { efforts: [{ id: 'off' }, { id: 'high' }, { id: 'max' }] } }
+      : undefined),
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const out = await runRequest(ctx, main)
+  assert.equal(out.model, 'minimax/minimax-m3.1-flash:free')
+  assert.equal(out.reasoningEffort, 'high', 'a positive effort is upgraded to the lowest declared positive level, never off')
 })
 
 test('tier_route applies per-session mode visible on the next request', async () => {
@@ -551,6 +581,49 @@ test('tier_configure rejects undeclared efforts and validates fallback chains', 
   const r3 = await configure.execute({ tier: 'cheap', provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium', fallback: [{ provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'max' }], sessionOnly: true }, { agent: main, signal: undefined })
   assert.equal(r3.ok, false, 'fallback entry effort must be declared by its model')
   assert.ok(r3.message.includes('low, medium, high'), r3.message)
+})
+
+test('tier_configure configures the smart-mode sidekick stages', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
+  // A stage configured without an effort is stored with an empty effort, so it
+  // stays omitted on the request (the provider applies its own default).
+  const first = await configure.execute({ tier: 'sidekick-fix', provider: 'deepseek-official', model: 'deepseek-v4-pro' }, { agent: main, signal: undefined })
+  assert.equal(first.ok, true, first.message)
+  assert.ok(first.message.includes('sidekick-fix'), first.message)
+  const patch = services.settings.updates.at(-1).patch
+  assert.equal(patch.sidekickFixProvider, 'deepseek-official')
+  assert.equal(patch.sidekickFixModel, 'deepseek-v4-pro')
+  assert.equal(patch.sidekickFixEffort, '', 'an omitted effort is persisted empty, never fitted to off')
+  // Every smart-mode stage is a configurable slot.
+  for (const [tier, provider, model, effort] of [
+    ['sidekick-explore', 'opencode-go', 'gpt-5.6-terra', 'high'],
+    ['sidekick-implement', 'cctq', 'gpt-5.6-terra', 'medium'],
+    ['sidekick-fix', 'deepseek-official', 'deepseek-v4-flash', 'high'],
+  ]) {
+    const r = await configure.execute({ tier, provider, model, reasoningEffort: effort, sessionOnly: true }, { agent: main, signal: undefined })
+    assert.equal(r.ok, true, r.message)
+    assert.ok(r.message.includes(tier), r.message)
+  }
+  // A stage has no chain of its own and rejects an undeclared effort.
+  const noChain = await configure.execute({ tier: 'sidekick-explore', fallback: [{ provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' }], sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(noChain.ok, false)
+  assert.ok(noChain.message.includes('no fallback chain'), noChain.message)
+  const badEffort = await configure.execute({ tier: 'sidekick-explore', provider: 'opencode-go', model: 'gpt-5.6-terra', reasoningEffort: 'medium', sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(badEffort.ok, false)
+  assert.ok(badEffort.message.includes('off, high, max'), badEffort.message)
+  // tier_sidekick spawns on the configured stage route.
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.deepEqual(services.subagents.started.at(-1).request.agentOptions, { provider: 'opencode-go', model: 'gpt-5.6-terra', reasoningEffort: 'high' })
+  // The status line reports the configured stage routes.
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const text = (await status.execute({}, { agent: main, signal: undefined })).status
+  assert.ok(text.includes('explore -> opencode-go/gpt-5.6-terra (high)'), text)
+  assert.ok(text.includes('implement -> cctq/gpt-5.6-terra (medium)'), text)
 })
 
 test('foreground tier_worker settles with the worker result via startActivation', async () => {
@@ -1104,6 +1177,53 @@ test('smart mode pins the main agent to the plan tier and blocks direct file edi
   assert.ok(allowed === undefined || allowed.kind !== 'deny', 'read passes for smart main')
 })
 
+test('smart-mode read budget denies the 3rd direct read/search and an explore delegation refills it', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  const applied = await route.execute({ tier: 'smart' }, { agent: main, signal: undefined })
+  assert.equal(applied.applied, 'smart')
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const next = async () => 'ran'
+
+  assert.equal(await guard({ agent: main, name: 'read', arguments: { file_path: 'src/a.ts' } }, next), 'ran', 'the 1st direct read is allowed')
+  assert.equal(await guard({ agent: main, name: 'grep', arguments: { pattern: 'parseRequest' } }, next), 'ran', 'the 2nd direct search is allowed')
+  const denied = await guard({ agent: main, name: 'glob', arguments: { pattern: '**/*.ts' } }, next)
+  assert.equal(denied.kind, 'deny')
+  assert.ok(denied.reason.includes('tier_sidekick'), denied.reason)
+  assert.ok(denied.reason.includes('explore'), denied.reason)
+  assert.ok(denied.reason.includes('>=3 files'), denied.reason)
+
+  // Delegating the reading resets the budget: the next two direct calls pass again.
+  assert.equal(
+    await guard({ agent: main, name: 'tier_sidekick', arguments: { stage: 'explore', task: 'find x' } }, next),
+    'ran',
+    'the explore delegation is allowed through the guard',
+  )
+  assert.equal(await guard({ agent: main, name: 'read', arguments: { file_path: 'src/a.ts' } }, next), 'ran', 'the 1st read after explore is allowed')
+  assert.equal(await guard({ agent: main, name: 'grep', arguments: { pattern: 'parseRequest' } }, next), 'ran', 'the 2nd call after explore is allowed')
+  assert.equal((await guard({ agent: main, name: 'read', arguments: { file_path: 'src/b.ts' } }, next)).kind, 'deny', 'the budget fills again after two calls')
+})
+
+test('smart-mode read budget denies a >=3-file ops_read_files batch on the first call and never charges a child', async () => {
+  const { ctx } = makeContext({ mode: 'smart' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const child = makeAgent('child', 'subagent')
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const next = async () => 'ran'
+  const batch = { files: [{ path: 'a.ts' }, { path: 'b.ts' }, { path: 'c.ts' }] }
+
+  const denied = await guard({ agent: main, name: 'ops_read_files', arguments: batch }, next)
+  assert.equal(denied.kind, 'deny', 'the Main Agent batch is denied immediately')
+  assert.ok(denied.reason.includes('tier_sidekick'), denied.reason)
+
+  // The budget is a Main-Agent rule: a child (the sidekick doing the reading)
+  // is never charged and may read as much as it needs.
+  assert.equal(await guard({ agent: child, name: 'ops_read_files', arguments: batch }, next), 'ran', 'a child agent is not blocked by the Main Agent read budget')
+})
+
 test('tier_sidekick spawns a child on the stage route and caches explored snippets', async () => {
   const { ctx, services } = makeContext({
     workerResult: 'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | parses the request body',
@@ -1127,6 +1247,97 @@ test('tier_sidekick spawns a child on the stage route and caches explored snippe
   const status = services.tools.registered.find((t) => t.name === 'tier_status')
   const st = await status.execute({}, { agent: main, signal: undefined })
   assert.ok(st.status.includes('turbovec cache: snippets=1'), st.status)
+})
+
+test('tier_sidekick spawns the child on the configured tiered-sidekick preset', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Touched files:\n- src/a.ts\nDiff summary: added a\nChecks: ok',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'implement', task: 'add a' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  const spawn = services.subagents.started.at(-1)
+  assert.equal(spawn.label, 'sidekick:implement')
+  assert.equal(spawn.request.agentPreset, 'tiered-sidekick', 'default config preset rides on the spawn request')
+  assert.equal(spawn.request.agentOptions.model, 'gpt-5.6-terra', 'agentOptions still carry the stage route')
+})
+
+test('tier_sidekick agentPreset argument overrides the configured preset', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Touched files:\n- src/a.ts\nDiff summary: added a\nChecks: ok',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'implement', task: 'add a', agentPreset: 'tiered' }, { agent: main, signal: undefined })
+  assert.equal(services.subagents.started.at(-1).request.agentPreset, 'tiered')
+  await sk.execute({ stage: 'implement', task: 'add b', agentPreset: 'inherit' }, { agent: main, signal: undefined })
+  assert.equal(services.subagents.started.at(-1).request.agentPreset, undefined, '"inherit" mounts the parent preset revision')
+})
+
+test('tier_sidekick retries on the parent preset when the preset cannot mount', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Touched files:\n- src/a.ts\nDiff summary: added a\nChecks: ok',
+    presetError: 'unknown agent preset "tiered-sidekick"',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'implement', task: 'add a' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.equal(services.subagents.started.length, 2, 'first attempt plus the preset-less retry')
+  assert.equal(services.subagents.started[0].request.agentPreset, 'tiered-sidekick')
+  assert.equal(services.subagents.started[1].request.agentPreset, undefined, 'retry inherits the parent composition')
+})
+
+test('tier_worker honors the configured workerAgentPreset', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const set = await cmd.handler({ rawInput: 'set worker-preset tiered-minimal', agent: main, signal: undefined })
+  assert.equal(set.kind, 'success', set.text)
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'say ok' }, { agent: main, signal: undefined })
+  assert.equal(services.subagents.started.at(-1).request.agentPreset, 'tiered-minimal')
+})
+
+test('tier_recall searches project memory without spawning a subagent', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Snippet: src/parser.ts | 1-25 | export function parseRequest(req) { return req.body } | parses the request body',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const recall = services.tools.registered.find((t) => t.name === 'tier_recall')
+  assert.ok(recall, 'tier_recall tool registered')
+  const empty = await recall.execute({ query: 'parseRequest' }, { agent: main, signal: undefined })
+  assert.ok(empty.results.includes('no cached entries matched'), empty.results)
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'explore', task: 'find the parser', paths: ['src'] }, { agent: main, signal: undefined })
+  const spawnsBefore = services.subagents.started.length
+  const hit = await recall.execute({ query: 'parseRequest' }, { agent: main, signal: undefined })
+  assert.ok(hit.results.includes('src/parser.ts'), hit.results)
+  assert.ok(hit.results.includes('parseRequest'), hit.results)
+  assert.equal(services.subagents.started.length, spawnsBefore, 'recall spawns nothing')
+  const status = services.tools.registered.find((t) => t.name === 'tier_status')
+  const st = await status.execute({}, { agent: main, signal: undefined })
+  assert.ok(st.status.includes('recallCalls=2'), st.status)
+})
+
+test('tier_recall kind=digest returns stage-outcome cards', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Touched files:\n- src/worker.ts\nDiff summary: added the worker entry point\nChecks: npm test pass',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'add the worker entry point' }, { agent: main, signal: undefined })
+  const recall = services.tools.registered.find((t) => t.name === 'tier_recall')
+  const hit = await recall.execute({ query: 'worker entry point', kind: 'digest' }, { agent: main, signal: undefined })
+  assert.ok(hit.results.includes('src/worker.ts') || hit.results.includes('worker'), hit.results)
+  assert.ok(hit.results.includes('worker entry point') || hit.results.includes('worker/'), hit.results)
 })
 
 test('tier_sidekick implement invalidates and re-indexes touched files', async () => {
@@ -2063,6 +2274,39 @@ test('tier_sidekick fits an undeclared stage effort before spawning', async () =
   assert.equal(spawn.request.agentOptions.reasoningEffort, 'low', 'medium was fitted to the declared low')
 })
 
+test('an explore stage without an effort stays omitted and still retries on the fallback route', async () => {
+  const { ctx, services } = makeContext({
+    workerResults: ['', 'Snippet: src/retried.ts | 1-4 | export const retried = true | found on retry'],
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const configure = services.tools.registered.find((t) => t.name === 'tier_configure')
+  // The live shape: the cheap route (minimax m3.1 flash free in the report)
+  // declares off|high|max, and explore is explicitly set to that same route
+  // without an effort, so route insurance does not kick in.
+  const cheap = await configure.execute({ tier: 'cheap', provider: 'opencode-go', model: 'gpt-5.6-terra', reasoningEffort: 'high', sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(cheap.ok, true, cheap.message)
+  const explore = await configure.execute({ tier: 'sidekick-explore', provider: 'opencode-go', model: 'gpt-5.6-terra', sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(explore.ok, true, explore.message)
+  const implement = await configure.execute({ tier: 'sidekick-implement', provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium', sessionOnly: true }, { agent: main, signal: undefined })
+  assert.equal(implement.ok, true, implement.message)
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.equal(services.subagents.started.length, 2, 'the empty first attempt was retried exactly once')
+  const first = services.subagents.started[0].request.agentOptions
+  assert.deepEqual({ provider: first.provider, model: first.model }, { provider: 'opencode-go', model: 'gpt-5.6-terra' })
+  assert.ok(!('reasoningEffort' in first), 'an omitted effort must stay omitted, never be fitted to off')
+  const retry = services.subagents.started[1].request.agentOptions
+  assert.deepEqual(
+    { provider: retry.provider, model: retry.model, reasoningEffort: retry.reasoningEffort },
+    { provider: 'cctq', model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
+    'an explicit explore route still falls back via resolveSidekickFallbackTarget',
+  )
+  assert.equal(out.snippets.length, 1)
+  assert.equal(out.snippets[0].path, 'src/retried.ts')
+})
+
 test('tier_sidekick refuses an unregistered stage provider with a clear message', async () => {
   const { ctx, services } = makeContext()
   const original = services.settings.describe
@@ -2302,4 +2546,345 @@ test('a touched path that climbs out of the project is not remembered', async ()
   assert.ok(st.text.includes('snippets=1'), 'only the in-project path is indexed: ' + st.text)
   const search = await cmd.handler({ rawInput: 'cache search evil', agent: main, signal: undefined })
   assert.ok(!search.text.includes('evil.ts'), 'the escaping path is not in the cache')
+})
+
+// ---- sidekick/TurboQuant: deterministic tool tracing + caller roots --------
+
+async function exportedCacheEntries(services, cmd, agent) {
+  const r = await cmd.handler({ rawInput: 'cache export', agent, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  const raw = services.fs.files.get('.dsh-turbovec-cache.export.json')
+  assert.ok(typeof raw === 'string', 'the cache export was written through the fs seam')
+  return JSON.parse(raw).entries
+}
+
+test('tier_sidekick indexes write/edit tool calls even when its report names no files', async () => {
+  const { ctx, services, childAgents } = makeContext({
+    workerResult: 'All done, checks green',
+    fs: { files: [] },
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  main.session.header.cwd = 'D:/proj/tracked'
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const original = services.subagents.startActivation
+  services.subagents.startActivation = async function (spec) {
+    const activation = await original.call(this, spec)
+    const child = childAgents.get(activation.childId)
+    assert.ok(child, 'the sidekick child is known to the mock')
+    assert.equal(await guard({ agent: child, name: 'write', arguments: { file_path: 'src/tracked.ts' } }, async () => 'ran'), 'ran')
+    assert.equal(await guard({ agent: child, name: 'edit', arguments: { file_path: 'D:/proj/tracked/src/tracked-abs.ts' } }, async () => 'ran'), 'ran')
+    assert.equal(await guard({ agent: child, name: 'write', arguments: { file_path: 'D:/elsewhere/outside.ts' } }, async () => 'ran'), 'ran')
+    return activation
+  }
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'implement', task: 'do the thing' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.touchedFiles.slice().sort(), ['src/tracked-abs.ts', 'src/tracked.ts'])
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const entries = await exportedCacheEntries(services, cmd, main)
+  const paths = entries.filter((e) => e.kind === 'snippet').map((e) => e.path).sort()
+  assert.deepEqual(paths, ['src/tracked-abs.ts', 'src/tracked.ts'], 'the in-project write/edit trace is indexed, relativized, and the outside path is dropped')
+})
+
+// ---- smart-mode sidekick: read tracing, route insurance, fallback retry ----
+
+test('explore sidekick caches the files its child actually read even without Snippet lines', async () => {
+  const { ctx, services, childAgents } = makeContext({
+    workerResult: 'Explored the module architecture',
+    fs: { files: [] },
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  main.session.header.cwd = 'D:/proj/exp'
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const original = services.subagents.startActivation
+  services.subagents.startActivation = async function (spec) {
+    const activation = await original.call(this, spec)
+    const child = childAgents.get(activation.childId)
+    assert.ok(child, 'the explore child is known to the mock')
+    assert.equal(await guard({ agent: child, name: 'read', arguments: { file_path: 'src/read-one.ts' } }, async () => 'ran'), 'ran')
+    assert.equal(await guard({
+      agent: child,
+      name: 'ops_read_files',
+      arguments: { files: [{ path: 'D:/proj/exp/src/read-two.ts' }, { path: 'D:/outside/secret.ts' }] },
+    }, async () => 'ran'), 'ran')
+    return activation
+  }
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find the module architecture' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.snippets.map((s) => s.path).sort(), ['src/read-one.ts', 'src/read-two.ts'], 'the child read trace becomes snippets without any Snippet: text')
+
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const entries = await exportedCacheEntries(services, cmd, main)
+  assert.deepEqual(entries.filter((e) => e.kind === 'snippet').map((e) => e.path).sort(), ['src/read-one.ts', 'src/read-two.ts'])
+  const digests = entries.filter((e) => e.kind === 'digest')
+  assert.deepEqual(digests.map((e) => e.path).sort(), ['src/read-one.ts', 'src/read-two.ts'], 'one Stage explore digest card per read file')
+  assert.ok(digests.every((e) => e.stage === 'explore'), 'every digest card belongs to Stage explore')
+  assert.ok(!entries.some((e) => String(e.path).includes('secret')), 'the outside-project path is never cached')
+})
+
+test('explore sidekick uses the configured implement route when no explore route is set', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const set = await cmd.handler({ rawInput: 'set sidekick-implement opencode-go gpt-5.6-terra high', agent: main, signal: undefined })
+  assert.equal(set.kind, 'success', set.text)
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  const spawn = services.subagents.started.at(-1)
+  assert.equal(spawn.request.agentOptions.provider, 'opencode-go', 'explore borrowed the working implement route instead of the bare cheap default')
+  assert.equal(spawn.request.agentOptions.model, 'gpt-5.6-terra')
+  assert.equal(spawn.request.agentOptions.reasoningEffort, 'high')
+})
+
+test('an empty first explore attempt is retried once on the fallback route', async () => {
+  const { ctx, services } = makeContext({
+    workerResults: ['', 'Snippet: src/retried.ts | 1-4 | export const retried = true | found on retry'],
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  assert.equal((await cmd.handler({ rawInput: 'set sidekick-explore cctq gpt-5.6-terra medium', agent: main, signal: undefined })).kind, 'success')
+  assert.equal((await cmd.handler({ rawInput: 'set sidekick-implement opencode-go gpt-5.6-terra high', agent: main, signal: undefined })).kind, 'success')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  assert.equal(out.ok, true)
+  assert.equal(services.subagents.started.length, 2, 'exactly one retry on the fallback route')
+  assert.equal(services.subagents.started[0].request.agentOptions.provider, 'cctq', 'the first attempt used the explore route')
+  assert.equal(services.subagents.started[1].request.agentOptions.provider, 'opencode-go', 'the retry used the resolved fallback route')
+  assert.equal(out.snippets.length, 1)
+  assert.equal(out.snippets[0].path, 'src/retried.ts')
+})
+
+test('a throwing first explore attempt is retried once on the fallback route', async () => {
+  const { ctx, services } = makeContext({
+    workerResult: 'Snippet: src/recovered.ts | 1-2 | export const recovered = true | recovered on retry',
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  assert.equal((await cmd.handler({ rawInput: 'set sidekick-explore cctq gpt-5.6-terra medium', agent: main, signal: undefined })).kind, 'success')
+  assert.equal((await cmd.handler({ rawInput: 'set sidekick-implement opencode-go gpt-5.6-terra high', agent: main, signal: undefined })).kind, 'success')
+  const original = services.subagents.startActivation
+  let attempts = 0
+  services.subagents.startActivation = async function (spec) {
+    attempts = attempts + 1
+    if (attempts === 1) throw new Error('spawn failed')
+    return original.call(this, spec)
+  }
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const out = await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  assert.equal(attempts, 2, 'the throwing route was retried exactly once')
+  assert.equal(out.ok, true)
+  assert.equal(out.snippets.length, 1)
+  assert.equal(out.snippets[0].path, 'src/recovered.ts')
+})
+
+test('tier_worker indexes write/edit tool calls even when its text report names no files', async () => {
+  const { ctx, services, childAgents } = makeContext({
+    workerResult: 'All done, checks green',
+    fs: { files: [] },
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  main.session.header.cwd = 'D:/proj/worker'
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  const original = services.subagents.startActivation
+  services.subagents.startActivation = async function (spec) {
+    const activation = await original.call(this, spec)
+    const child = childAgents.get(activation.childId)
+    assert.equal(await guard({ agent: child, name: 'write', arguments: { file_path: 'src/worker-tracked.ts' } }, async () => 'ran'), 'ran')
+    assert.equal(await guard({ agent: child, name: 'edit', arguments: { file_path: 'D:/proj/worker/src/worker-abs.ts' } }, async () => 'ran'), 'ran')
+    assert.equal(await guard({ agent: child, name: 'write', arguments: { file_path: 'D:/elsewhere/outside-worker.ts' } }, async () => 'ran'), 'ran')
+    return activation
+  }
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const out = await worker.execute({ task: 'do the thing' }, { agent: main, signal: undefined })
+  assert.equal(out.output, 'All done, checks green')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const entries = await exportedCacheEntries(services, cmd, main)
+  const paths = entries.filter((e) => e.kind === 'snippet').map((e) => e.path).sort()
+  assert.deepEqual(paths, ['src/worker-abs.ts', 'src/worker-tracked.ts'])
+  assert.ok(!paths.some((p) => p.includes('outside')), 'the outside-project path is never cached')
+})
+
+test('tier_worker indexes the structured output of a schema-returning worker', async () => {
+  const structured = { touchedFiles: ['src/from-schema.ts'], diffSummary: 'schema summary', checks: 'pass' }
+  const { ctx, services } = makeContext({
+    workerResult: 'All done',
+    workerStructured: structured,
+    fs: { files: [] },
+  })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  main.session.header.cwd = 'D:/proj/schema'
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  const out = await worker.execute({ task: 'do the schema thing' }, { agent: main, signal: undefined })
+  assert.deepEqual(out.structured, structured)
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const entries = await exportedCacheEntries(services, cmd, main)
+  const snippets = entries.filter((e) => e.kind === 'snippet')
+  assert.equal(snippets.length, 1)
+  assert.equal(snippets[0].path, 'src/from-schema.ts')
+  assert.equal(snippets[0].snippet, 'schema summary')
+  assert.equal(snippets[0].stage, 'worker')
+})
+
+test('the cache resolves the caller session cwd without an inbox event', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  main.session.header.cwd = 'D:/proj/direct'
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+
+  // No agent/inbox/inserted has fired yet: the caller itself names the project.
+  let r = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(r.kind, 'success', r.text)
+  assert.ok(r.text.includes('project=D:/proj/direct'), r.text)
+
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  await sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined })
+  r = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.ok(r.text.includes('project=D:/proj/direct'), 'the sidekick used the caller project: ' + r.text)
+
+  // An off-mode user message is learned before the mode gate and must not
+  // overwrite the caller's own project.
+  const route = services.tools.registered.find((t) => t.name === 'tier_route')
+  await route.execute({ tier: 'off' }, { agent: main, signal: undefined })
+  const inbox = ctx.listeners['agent/inbox/inserted'][0]
+  await inbox({ agent: main, message: { source: { kind: 'user' }, content: 'still here' } })
+  r = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.ok(r.text.includes('project=D:/proj/direct'), r.text)
+})
+
+test('the plan explore gate credits ops_read_files and a sidekick explore delegation', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const off = await cmd.handler({ rawInput: 'gate advisor off', agent: main, signal: undefined })
+  assert.equal(off.kind, 'success', off.text)
+  const guard = ctx.listeners['tools/pre-execute'][0]
+  for (const fn of ctx.listeners['session/event']) fn(main.session, { type: 'plan/mode', data: { active: true } })
+  const next = async () => 'ran'
+  const exit = () => guard({ agent: main, name: 'exit_plan_mode', arguments: { plan: '# Plan' } }, next)
+
+  let r = await exit()
+  assert.equal(r.kind, 'deny')
+  assert.ok(r.reason.includes('ops_read_files'), r.reason)
+  assert.ok(r.reason.includes('tier_sidekick'), r.reason)
+
+  assert.equal(await guard({ agent: main, name: 'ops_read_files', arguments: { files: [{ path: 'src/a.ts', offset: 1, limit: 20 }] } }, next), 'ran')
+  r = await exit()
+  assert.equal(r.kind, 'deny', 'one exploration call is not enough')
+  assert.ok(r.reason.includes('1 read/search'), r.reason)
+
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const sidekickExplore = await guard(
+    { agent: main, name: 'tier_sidekick', arguments: { stage: 'explore', task: 'find x' } },
+    async () => sk.execute({ stage: 'explore', task: 'find x' }, { agent: main, signal: undefined }),
+  )
+  assert.equal(sidekickExplore.stage, 'explore')
+  assert.equal(await exit(), 'ran', 'the two exploration calls satisfy the gate')
+})
+
+// ---- cache telemetry: passive, read-only prompt-cache lapse reporting ------
+
+const CACHE_USAGE = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 1000, cacheWriteTokens: 500 }
+
+test('cache telemetry: main-agent steps and a past-ttl gap reach /tier cache status', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  // The listener resolves the agent from the session, exactly like DSH does.
+  services.agents.register(main)
+  const emit = (event) => { for (const fn of ctx.listeners['session/event']) fn(main.session, event) }
+  const T1 = 1_700_000_000_000
+  emit({ type: 'assistant/message', seq: 1, time: T1, data: { turn: 1, step: 1, message: {}, usage: CACHE_USAGE } })
+  // Unrelated session events are neither recorded nor thrown on.
+  emit({ type: 'step/start', seq: 2, time: T1 + 1000, data: {} })
+  emit({ type: 'plan/mode', seq: 3, time: T1 + 2000, data: { active: false } })
+  // 400 s later: past the default 300 s (5 min) prompt-cache TTL.
+  emit({ type: 'assistant/message', seq: 4, time: T1 + 400_000, data: { turn: 1, step: 2, message: {}, usage: CACHE_USAGE } })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const out = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(out.kind, 'success', out.text)
+  assert.match(out.text, /cache telemetry/, out.text)
+  assert.match(out.text, /main steps observed: 2/, out.text)
+  assert.match(out.text, /usage fields: reported/, out.text)
+  assert.match(out.text, /lapses: 1 total/, out.text)
+  assert.match(out.text, /ttl 5 min/, out.text)
+  assert.ok(out.text.includes('TurboQuant cache:'), 'the existing cache stats line is untouched')
+})
+
+test('cache telemetry: an empty timeline and a usage-less step degrade honestly', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  services.agents.register(main)
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  // No events yet: the command still renders and says so.
+  const before = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(before.kind, 'success', before.text)
+  assert.match(before.text, /cache telemetry: no main-agent usage recorded/, before.text)
+  const emit = (event) => { for (const fn of ctx.listeners['session/event']) fn(main.session, event) }
+  // A message whose data carries no usage is still a real step.
+  emit({ type: 'assistant/message', seq: 1, time: 1_700_000_000_000, data: { turn: 1, step: 1, message: {} } })
+  // Unusable shapes are ignored silently: no throw, no invented step.
+  emit({ type: 'assistant/message', seq: 2, time: 'not-a-time', data: { usage: CACHE_USAGE } })
+  emit(null)
+  const after = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(after.kind, 'success', after.text)
+  assert.match(after.text, /main steps observed: 1/, after.text)
+  assert.match(after.text, /usage fields: absent/, after.text)
+  assert.match(after.text, /lapses: 0 total/, 'a single step cannot be a lapse')
+})
+
+test('cache telemetry: child-session steps are never recorded on the main timeline', async () => {
+  const { ctx, services } = makeContext()
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  // A child session emits the same assistant/message event; isChildAgent()
+  // recognises it from the session header origin, exactly as in production.
+  const child = makeAgent('child', 'subagent')
+  services.agents.register(main)
+  services.agents.register(child)
+  for (const fn of ctx.listeners['session/event']) {
+    fn(child.session, { type: 'assistant/message', seq: 1, time: 1_700_000_000_000, data: { turn: 1, step: 1, message: {}, usage: CACHE_USAGE } })
+    fn(child.session, { type: 'assistant/message', seq: 2, time: 1_700_000_400_000, data: { turn: 1, step: 2, message: {}, usage: CACHE_USAGE } })
+  }
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const out = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.equal(out.kind, 'success', out.text)
+  assert.match(out.text, /cache telemetry: no main-agent usage recorded/, 'the child is not a main agent')
+  assert.doesNotMatch(out.text, /lapses: 1 total/, 'a child gap is not the main agent\'s lapse')
+})
+
+test('cache telemetry: sidekick and worker child windows are attributed to the caller', async () => {
+  const { ctx, services } = makeContext({ workerResult: 'All done' })
+  applyAgent(ctx)
+  const main = makeAgent('main')
+  services.agents.register(main)
+  const emit = (event) => { for (const fn of ctx.listeners['session/event']) fn(main.session, event) }
+  emit({ type: 'assistant/message', seq: 1, time: 1_700_000_000_000, data: { turn: 1, step: 1, message: {}, usage: CACHE_USAGE } })
+  const cmd = services.commands.registered.find((c) => c.name === 'tier')
+  const sk = services.tools.registered.find((t) => t.name === 'tier_sidekick')
+  const skOut = await sk.execute({ stage: 'implement', task: 'write the parser' }, { agent: main, signal: undefined })
+  assert.equal(skOut.ok, true, skOut.output)
+  // The handler times the child run itself (a child's session events are not
+  // parent events), so the window lands on the calling agent's timeline. The
+  // mock's fake child finishes in well under the 5 min TTL, so this case covers
+  // the wiring and the count — not a wall-clock-attributable lapse (which would
+  // need a real >TTL wait or a faked clock).
+  let out = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.match(out.text, /child windows: 1/, out.text)
+  assert.match(out.text, /lapses: 0 total, 0 attributable/, out.text)
+  const worker = services.tools.registered.find((t) => t.name === 'tier_worker')
+  await worker.execute({ task: 'do the thing' }, { agent: main, signal: undefined })
+  out = await cmd.handler({ rawInput: 'cache status', agent: main, signal: undefined })
+  assert.match(out.text, /child windows: 2/, 'the tier_worker run window is timed too: ' + out.text)
 })

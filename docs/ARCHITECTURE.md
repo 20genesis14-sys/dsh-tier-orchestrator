@@ -13,14 +13,18 @@ way it is).
 
 DSH runs plugins inside Cordis scopes. A *profile bundle* (`cordis.patch.yml`)
 can contribute host-plane entries and agent presets. Our bundle contributes
-two rows:
+four rows:
 
 - a **host row** `tier-routing` whose `Config` schema carries every user
   setting as *volatile fields* — that is what makes the WebUI settings page
   exist and what makes edits persist into the profile;
 - a **`tiered` agent preset** — a copy of the standard 0.2.1 roster plus one
   extra row `tier-routing-agent` (the same npm package, but instantiated with
-  `config.plane: 'agent'`).
+  `config.plane: 'agent'`);
+- a **`tiered-minimal` agent preset** — the pi-like minimal roster
+  (§12);
+- a **`tiered-sidekick` agent preset** — the slim delegation roster
+  `tier_sidekick` children mount (§13).
 
 The same `apply(ctx, config)` runs twice in different scopes. On the host it
 does almost nothing (the schema itself does the work). Inside an agent session
@@ -29,8 +33,10 @@ prompt section — that is where all routing happens.
 
 ```
 profile patch (cordis.patch.yml)
-├── tier-routing        (host)   — volatile config → Settings page, persistence
-└── preset-tiered       (preset) — standard roster + tier-routing-agent (agent)
+├── tier-routing           (host)   — volatile config → Settings page, persistence
+├── preset-tiered          (preset) — standard roster + tier-routing-agent (agent)
+├── preset-tiered-minimal  (preset) — pi-like minimal roster + tier-routing-agent
+└── preset-tiered-sidekick (preset) — slim delegation roster + tier-routing-agent
         └─ apply(ctx, {plane:'agent'}) ← everything below runs here
 ```
 
@@ -122,6 +128,7 @@ strings — agents are GC'd with their sessions):
 | `fallbackStates` | `{index, until, tierName}` | `agent/request-error` handler | `activeFallbackTarget` |
 | `cheapEfforts` | `{effort, until}` | `raiseCheapEffort` | `currentCheapEffort` |
 | `planStates` (keyed on **session**) | `boolean` | `session/event` listener (`plan/mode`), `setPlanMode`, and a one-time fold of `session.ownEvents()` on the first read for a resumed session | `planActive` — the real `Session` has no public `.events`, so we fold the stream ourselves; `session.events` is only a compat fallback (re-folded per read, never cached, because a mock/legacy array is mutable) |
+| `cacheTelemetries` | `{steps[], childWindows[], usageFields}` (bounded: 200 steps / 100 windows) | `session/event` listener (`assistant/message`) and the `tier_sidekick` / `tier_worker` handlers (child-run windows) | `/tier cache status` → `analyzeCacheLapses` in `core/cache-cost.js` |
 
 Global mutable state lives in one `state` object: `mode` (global default),
 `subagentPolicy`, thresholds/TTLs, and `state.tiers` (the registry snapshot).
@@ -178,7 +185,7 @@ role route when roles are on, then the strong route and its chain.
 | `tier_route` tool / `/tier strong|cheap|auto|delegated|off` | Per-session mode; `persist:true` also writes the session default via the plugin |
 | `tier_configure` / `/tier set` | Re-point a tier (provider/model/effort/fallback chain) with `resolveModelInfo` effort validation; persists via settings |
 | `tier_advisor` / `/advisor`, `tier_review` / `/tier review` | Strong-tier consultations via `consult.js` specs; `runConsult` walks `attemptChain(primary, strong chain)` through `streamText`, stateless per call |
-| `tier_worker` | `startWorker` on a chosen tier; `outputSchema`, `agentPreset` (spawn), `maxDepth`, `background` (jobs) |
+| `tier_worker` | `startWorker` on a chosen tier; `outputSchema`, `agentPreset` (spawn), `background` (jobs) |
 | `tier_escalate_effort` / `/tier effort` | One effort step up the ladder, bounded by declared efforts |
 | `tier_status` / `/tier status` | Full diagnostics incl. `seams:` capability report |
 | `tools/pre-execute` guard | Denies `isHighImpact` calls while the cheap tier executes |
@@ -318,6 +325,12 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
   with a message that names `/tier set sidekick-<stage>`.
 - Explore results are upserted into the TurboQuant cache; implement/fix results
   invalidate touched paths and index the change summary.
+- `tier_recall` gives the calling agent direct read access to the same cache:
+  a local vector search (`query`, optional `kind: "digest"`, `k` 1-8) rendered
+  as a short hit list — no subagent spawn and no model call, so recalling
+  memory costs nothing and keeps the Main Agent context clean. Calls are
+  counted in `diag.recallCalls` (shown by `/tier status`); the read-budget
+  denial in smart mode points at the tool.
 
 ### Advisor budget
 
@@ -416,11 +429,13 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
 
 ### Tool surface in pi mode
 
-- In `promptMode: 'pi'` only `tier_worker` is registered. The other seven
+- In `promptMode: 'pi'` only `tier_worker` and `tier_recall` are registered —
+  recall is a read path (local vector search, no subagent, no model call), so
+  the minimal preset keeps memory access too. The other seven
   `tier_*` tools (`tier_status`, `tier_advisor`, `tier_review`, `tier_route`,
-  `tier_configure`, `tier_escalate_effort`, `tier_sidekick`) are gated by
-  `const fullToolset = promptMode !== 'pi'` in `lib/index.js`: every
-  registered tool adds its definition to every request (all eight measured
+  `tier_configure`, `tier_escalate_effort`, `tier_sidekick`) are
+  gated by `const fullToolset = promptMode !== 'pi'` in `lib/index.js`: every
+  registered tool adds its definition to every request (all nine measured
   at ~10.7K characters, ~3K tokens).
 - The guard denial and the smart-mode denial name `tier_worker` in pi mode,
   because the tools they used to point at are not declared there.
@@ -449,7 +464,54 @@ Live acceptance: install the bundle, open a session on the `tiered` preset,
 - All file access goes through the mounted `ctx.fs` backend — containment is
   the harness's job, as with the TurboQuant cache.
 
-## 13. v0.10.0 additions: decision-model stages (Jev / System One / OpenRouter Decisions)
+## 13. The `tiered-sidekick` delegation preset
+
+`cordis.patch.yml` gains a fourth row, `preset-tiered-sidekick`
+(`@deepseek-ai/dsh-agent-preset`, id `tiered-sidekick`, order 25), the
+composition `tier_sidekick` children mount instead of inheriting the
+parent's full preset (43+ tools on a loaded profile, ~3K tokens of tool
+definitions per request, paid by every child call):
+
+- persona one-liner (`complete: true`), the same persistent platform
+  terminal group as the other presets, `tool-fs-search` (glob/grep — the
+  explore stage searches repositories), `agent-instructions` (AGENTS.md,
+  16 KiB cap — implement/fix children still see the repo contract), the
+  compaction group, and the agent-plane `tier-routing` row with
+  `promptMode: pi`. Pi mode contributes the minimal `read`/`write`/`edit`,
+  `tier_worker`, `tier_recall`, and every listener — including the
+  pre-execute hook that traces child tool calls into the cache.
+- Excluded on purpose: `dsh-tool-fs` (its names collide with the pi-style
+  minimal fs tools), plan mode, subagents/workflow, jobs/schedule, goal,
+  todo, web, skills, ask-user. `send_message` is unnecessary because
+  delegation uses `delivery: 'caller'`.
+
+Selection and degrade:
+
+- `tier_sidekick` resolves the child preset per call: the tool's own
+  `agentPreset` argument wins, else the volatile `sidekickAgentPreset`
+  config (default `tiered-sidekick`); `inherit` or an empty value mounts
+  the parent's current preset revision — the pre-change behavior. The field
+  only rides on spawn-provider activations; fork/external reject it.
+- `tier_worker` resolves the same way through `workerAgentPreset`
+  (default empty = inherit; a configured preset also prefers the spawn
+  provider when no explicit `provider` argument is given).
+- When the host cannot mount the preset (older bundle, a profile without
+  the row), `tier_sidekick` retries the same spawn once without
+  `agentPreset` — recording `diag.lastFallback` — before the route-fallback
+  chain runs; the same degrade wraps the backup-route retry.
+- `/tier set sidekick-preset|worker-preset <id|inherit|default>` writes the
+  volatile fields; `/tier status` prints a `child presets:` line.
+- `agentOptions` still carries provider/model/effort independently —
+  the preset composes the child, `agentOptions` routes it.
+
+Global rows are unfenceable: a child roster equals the preset-scoped rows
+PLUS every profile-global row (`dsh-ops`, web plugins, …). No preset can
+suppress global mounts, so the exact child tool count is profile-dependent
+— ~9 preset tools on a clean profile, more wherever global rows add or
+replace tools. The preset only guarantees the preset-scoped share stays
+minimal.
+
+## 14. v0.10.0 additions: decision-model stages (Jev / System One / OpenRouter Decisions)
 
 ### The two layers
 
@@ -555,7 +617,81 @@ below the block threshold.
   probability, never as an approval.
 - Never on the per-request hot path (`agent/request` is untouched).
 
-## 14. Review log
+## 14. Cache telemetry: prompt-cache lapses while a child runs
+
+Smart mode keeps one long-lived main-agent session while sidekick/worker
+children run on other models. If the gap between two consecutive main-agent
+assistant messages exceeds the provider's prompt-cache TTL (Anthropic's short
+TTL is 5 min), the prefix cache goes cold and the main agent's next step
+re-writes the whole prefix at the cache-write tariff. The plugin *measures*
+that cost; it never prevents it.
+
+**Data flow.**
+
+```
+session/event (assistant/message)                     [lib/index.js listener]
+  → agents.get(session.id); a child agent is skipped (isChildAgent)
+  → lib/dsh/cache-telemetry.js  recordAssistantMessage(ts + pickCacheUsage)
+  → cacheTelemetries: WeakMap<agent, {steps[], childWindows[], usageFields}>
+  → /tier cache status → analyzeCacheLapses   [lib/core/cache-cost.js]
+  → formatCacheLapseReport → appended to the cache-status text
+```
+
+- `lib/dsh/cache-telemetry.js` is shape knowledge only: no `@deepseek-ai/*`
+  import, no clock of its own, no I/O, never mutates the event, never throws
+  and never initiates a request. `recordAssistantMessage` returns `false`
+  (state untouched) for anything that is not an `assistant/message` event with
+  a finite `time`. `usageFields` is `'reported'` when the message carried a
+  usage object, `'absent'` when it did not, and `'unknown'` only until the
+  first such event is seen.
+- **Child windows are timed in the handlers**, not folded from events:
+  `tier_sidekick`'s `attemptOn` and `tier_worker`'s `settleRun` take
+  `Date.now()` around the child run and `recordChildWindow()` it on the
+  *calling* agent. A child ran its own session, so the parent receives no
+  separate event for the window — and a child's own steps must never land on
+  the main agent's timeline. `Date.now()` stays in `index.js`; `core/` remains
+  clock-free.
+- Both logs are bounded — 200 steps (`MAX_TELEMETRY_STEPS`) and 100 child
+  windows (`MAX_TELEMETRY_WINDOWS`), oldest dropped first — so a long session
+  cannot grow them without limit.
+- `/tier cache status` appends the block after the TurboQuant stats line, in
+  the same flat-string shape (lines joined with `\n`):
+
+  ```
+  TurboQuant cache: snippets=0, digests=0 (…) , project=D:\proj
+  cache telemetry (passive, read-only):
+  main steps observed: 2 (usage fields: reported), child windows: 0
+  lapses: 1 total, 0 attributable to child windows (ttl 5 min)
+  estimated prefix re-write: 1600 tokens; share of session spend: unknown (insufficient data)
+  ```
+
+  With no recorded steps it prints one honest line instead
+  (`cache telemetry: no main-agent usage recorded yet …`) and stops.
+
+**Config (host-row volatile fields).** `cacheTtlMs` (default 300 000),
+`cacheShareThreshold` (0.05), `cacheLapsesPerHourThreshold` (2) and
+`cacheMinLapses` (3) fall back to the core defaults when absent or invalid.
+The tariff rates are USD per 1M tokens and must all be usable together:
+`cacheTariffPrompt`, `cacheTariffCacheRead`, `cacheTariffCacheWrite`,
+`cacheTariffCompletion` (default `-1` = not configured). With any of them
+unset the report prices nothing and shows the re-written prefix as a share of
+the observed input-side token volume instead of dollars.
+
+**Honest limitations.**
+
+- DSH usage events carry **no 1-hour cache bucket** (`TokenUsage` has no
+  `cacheWrite1h`), so the long-retention write tariff never appears from
+  measurements — only the counters the adapter actually reported.
+- `prefixTokens` *approximates* the next step's prompt prefix from that step's
+  input-side tokens (`cacheRead + cacheWrite + input`). It is an estimate from
+  reported usage, not a provider-issued cache-miss number.
+- A verdict needs at least `cacheMinLapses` observed steps; below that the
+  report says `insufficient data` and still shows the lapse count it saw.
+- **The plugin changes no request**: it never injects `cacheRetention` or any
+  `cache_control` block. The `cacheRetention: 'long'` line is a recommendation
+  for the user's own profile config, and the report says so.
+
+## 15. Review log
 
 `docs/REVIEW.md` records how a review pass is run (contract diff against the
 pinned `.d.ts`, coverage-driven gap hunt, mock probes, the dogfooded

@@ -29,6 +29,14 @@ test('standard mode keeps the full guidance block', () => {
   assert.ok(lines.some((l) => l.includes('Never claim a tier or model ran')))
 })
 
+test('standard mode points searching or reading >=3 files at the explore sidekick', () => {
+  const text = tierPromptSection(INFO).join('\n')
+  assert.ok(text.includes('tier_sidekick'), text)
+  assert.ok(text.includes('stage "explore"'), text)
+  assert.ok(text.includes('>=3 files'), text)
+  assert.ok(text.includes('3rd direct read/search call is blocked'), text)
+})
+
 test('pi mode collapses to a few short lines', () => {
   const lines = tierPromptSection({ ...INFO, promptMode: 'pi' })
   assert.equal(lines[0], '## Tiered model routing')

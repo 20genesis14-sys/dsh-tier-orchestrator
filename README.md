@@ -135,7 +135,7 @@ sequenceDiagram
   on a chosen tier (`agentOptions` model injection via `subagents.startActivation`),
   with `outputSchema` (structured results), `agentPreset` (compose the worker on a
   different preset — replaces the retired `persona`/`toolFilter` options, which DSH
-  0.2 removed from the subagent contract), `maxDepth` (delegation-depth cap) and
+  0.2 removed from the subagent contract) and
   `background` (run via the jobs service, owned by the session id).
   `/tier subagent <inherit|cheap|strong>` also routes ordinary `subagent` and
   `subagent_fork` children before their first request; an automatic escalation remains
@@ -149,6 +149,10 @@ sequenceDiagram
   `tier_sidekick` in three stages: `explore` (compact file snippets), `implement`
   (code/tests/lint), `fix` (bug fixes). Each stage runs on its own model
   (`/tier set sidekick-<stage> <provider> <model> [effort]`), cheap tier by default.
+  Children mount the slim `tiered-sidekick` preset (files + search + shell +
+  memory, not the parent's full roster); `sidekickAgentPreset` /
+  `/tier set sidekick-preset` changes it, `inherit` restores the old behavior,
+  and an unmountable preset retries on the parent's composition.
 - **Advisor per-turn budget**: `tier_advisor` allows `advisorMaxCallsPerTurn` calls
   (default 2) per user turn without asking; the next call asks through the approval seam
   (30s timeout) and fails closed without approval. The budget resets on each new user
@@ -178,8 +182,9 @@ sequenceDiagram
 - **TurboQuant 4-bit snippet cache**: local code embeddings (d=512, Signed Feature
   Hashing + FWHT) stored as 4-bit vectors (256 bytes each) in a persistent
   `.dsh-turbovec-cache.json` (via `ctx.fs`, in-memory fallback). `tier_sidekick`
-  searches it for snippets and injects them into the prompt. `/tier cache
-  status|clear|search <query>`.
+  searches it for snippets and injects them into the prompt; `tier_recall`
+  gives the calling agent the same search directly (no subagent, no model
+  call). `/tier cache status|clear|search <query>`.
 - **Digest cards + stable prefixes (v0.8.1)**: each completed sidekick stage writes a
   memory card (diffSummary/checks/issues, capped 16 per stage) that later calls of the
   same stage inject as `Previous outcomes (memory):`. Prompt assembly uses a fixed
@@ -213,11 +218,15 @@ dsh plugin --profile web add .
 #    namespace is host-served).
 ```
 
-Two presets are provided:
+Three presets are provided:
 
 - **`tiered`** — the standard roster: full DSH toolset plus tiered routing.
 - **`tiered-minimal`** — a Pi-like minimal prompt (see
   [Minimal preset](#minimal-preset-tiered-minimal)).
+- **`tiered-sidekick`** — the slim roster `tier_sidekick` / `tier_worker`
+  children mount by default (see
+  [Sidekick preset](#sidekick-preset-tiered-sidekick)); pick it only for
+  delegated children, not as a session preset.
 
 Uninstall: `dsh plugin --profile web remove dsh-tier-orchestrator` removes both the
 host entry and the `tiered` preset on the next startup.
@@ -234,8 +243,8 @@ host entry and the `tiered` preset on the next startup.
    - both tiers with their provider/model/effort,
    - a `diag:` line with live counters.
 4. The `tier_status`, `tier_route`, `tier_configure`, `tier_advisor`,
-   `tier_review`, `tier_worker`, and `tier_sidekick` tools must be callable in
-   that session.
+   `tier_review`, `tier_recall`, `tier_worker`, and `tier_sidekick` tools must
+   be callable in that session.
 5. While executing on the cheap tier, a high-impact command (e.g. `rm -rf`,
    `sudo …`) must be denied by the guard with an escalation hint.
 6. `/tier set strong <provider> <model> [effort]` must reply
@@ -255,9 +264,10 @@ A Pi-style minimal prompt for users who want the leanest possible agent:
   plugin with sparse schemas; no fs-observation-policy, so edits do not
   require a prior read) plus the platform terminal — `bash` on POSIX,
   `pwsh` on Windows — with a one-line description. Of this plugin's own tools
-  only `tier_worker` is declared: every registered tool adds its definition to
-  every request, so the seven other `tier_*` tools (`tier_status`,
-  `tier_advisor`, `tier_review`, `tier_route`, `tier_configure`,
+  only `tier_worker` and `tier_recall` are declared (recall is a local read
+  path, so the minimal session keeps memory access): every registered tool
+  adds its definition to every request, so the seven other `tier_*` tools
+  (`tier_status`, `tier_advisor`, `tier_review`, `tier_route`, `tier_configure`,
   `tier_escalate_effort`, `tier_sidekick`) are registered in the standard
   preset only. No skills, jobs, schedule, goal, todo, web, present, ask-user,
   subagents/workflow, fs-search, MCP, or plugin-manager tools.
@@ -277,6 +287,27 @@ the standard preset. Excluded capabilities are not lost: use them in a
 session on the `tiered` preset, or spawn a worker on it from a minimal
 session with `tier_worker` + `agentPreset: tiered`. The preset is chosen at
 session creation; existing sessions keep theirs (DSH behavior).
+
+### Sidekick preset (`tiered-sidekick`)
+
+The slim roster `tier_sidekick` children mount by default — instead of
+inheriting the parent's 40+ tool definitions on every request:
+
+- **Persona**: one delegation-focused line; **tools**: pi-style
+  `read`/`write`/`edit`, `glob`/`grep` (`tool-fs-search`, the explore stage
+  searches), the platform terminal, `tier_worker`, `tier_recall`;
+  `agent-instructions` (AGENTS.md, 16 KiB cap) and context compaction stay.
+- No `dsh-tool-fs` (names collide with the minimal fs tools), plan mode,
+  subagents/workflow, jobs/schedule, goal, todo, web, skills, or ask-user.
+- Selection: the call's `agentPreset` argument wins, else
+  `sidekickAgentPreset` (default `tiered-sidekick`;
+  `/tier set sidekick-preset <id|inherit>`), else the parent's preset.
+  `workerAgentPreset` does the same for `tier_worker` (default `inherit`).
+  Presets apply on the spawn provider only; an unmountable preset retries
+  once on the parent's composition.
+- Profile-global rows (dsh-ops, web plugins) mount on top of every preset,
+  so the exact child roster is profile-dependent — the preset slims only
+  the preset-scoped share.
 
 ## Usage
 
@@ -303,6 +334,8 @@ session creation; existing sessions keep theirs (DSH behavior).
 # tiers are fully configured plugin-side; the DSH session picker never drives routing
 /tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
                                             # per-stage sidekick model for smart mode (blank = cheap tier)
+/tier set sidekick-preset <id|inherit>      # agent preset composing sidekick children (default tiered-sidekick)
+/tier set worker-preset <id|inherit>        # agent preset composing tier_worker children (default inherit)
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # subagent route; caller is for fork only, capped never goes above main
 /tier subagent force-explicit <on|off>      # route explicit-model subagent children by tier rules (default off)
 /tier review <focus>                        # strong-tier review
@@ -337,7 +370,7 @@ Tiered model routing
 | `tier_route` | Set **this session's** tier (strong/cheap/auto/delegated/smart/off, optionally persisted) |
 | `tier_configure` | Reconfigure a tier (strong/main/cheap) or a role (advisor/reviewer) provider/model/effort, and the subagent policy |
 | `tier_sidekick` | Smart-mode delegation: spawn a staged subagent (`explore`/`implement`/`fix`) on the stage model with TurboQuant cache injection |
-| `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / agentPreset / maxDepth / background |
+| `tier_worker` | Dispatch a bounded task packet to a subagent on a chosen tier; supports outputSchema / agentPreset / background |
 | `tier_escalate_effort` | Raise the cheap tier's reasoning effort one step (low → medium → high → max), bounded by the model's declared efforts |
 | `tier_status` | Read-only diagnostics: global & session tiers, escalation state, listener counters, effective tier |
 
@@ -411,7 +444,7 @@ Verified in live multi-round sessions (dynamic-plugin form):
 | Guard matrix (auto/strong/off) | ✅ auto denies / strong allows / off allows + restores default / auto-restored denies |
 | Guard hardening (split flags, runner prefixes, prose, .env whitelist, case) | ✅ 7/7 live probes |
 | Tools, positive paths | ✅ advisor/review hit the strong tier; route modes; configure; worker on both spawn and fork providers |
-| Worker options | ✅ outputSchema structured result, agentPreset pass-through, maxDepth rejection, background jobs (toolFilter/persona verified on the pre-0.2 API; removed upstream since) |
+| Worker options | ✅ outputSchema structured result, agentPreset pass-through, background jobs (toolFilter/persona verified on the pre-0.2 API; removed upstream since) |
 | Tools, negative paths | ✅ invalid provider rejected, invalid subagent provider error |
 | Subagent tiering | ✅ cheap tier on flash, strong tier on pro (child logs + return values) |
 | Failure-escalation event path | ✅ `agent/error` fires, counters increment, off mode correctly skips |

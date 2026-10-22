@@ -5,12 +5,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { isHighImpact, hasRecursiveForceRm } from '../lib/core/guard.js'
 import { resolveTierSpec, classifyFallback, validateReasoningEffort, nextEffortStep, fallbackActive, advanceFallback, migrateTierConfig, reconcileReasoningEffort, EFFORT_LADDER, DEFAULT_TIER_CONFIG, FALLBACK_TRIGGER_CODES, FALLBACK_IGNORE_CODES, attemptChain } from '../lib/core/routing.js'
-import { escalationStep, escalationActive, escalationExpired, decideGuardAction, decideErrorActions, decidePlanExit } from '../lib/core/policy.js'
+import { escalationStep, escalationActive, escalationExpired, decideGuardAction, decideErrorActions, decidePlanExit, EXPLORE_TOOLS, SMART_MAIN_READ_BUDGET, decideSmartReadBudget } from '../lib/core/policy.js'
 import { consultSpec, CONSULTS, modelFamily, reviewerConflicts } from '../lib/core/consult.js'
 import { childRouteSource, cappedTier } from '../lib/core/routing.js'
 import { createTierRegistry, tierLabel, chainText, TIER_ORDER } from '../lib/core/tiers.js'
 import { embedCodeText, rotateVector, createTurboQuantIndex, TURBO_LEVELS, DIGEST_MAX_PER_STAGE } from '../lib/core/turbovec.js'
-import { sidekickSpec, resolveSidekickTarget, parseExploreSnippets, parseChangeReport, formatCard, formatMemoryBlock, digestStagesFor, WORKER_STAGE, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
+import { sidekickSpec, resolveSidekickTarget, resolveSidekickFallbackTarget, parseExploreSnippets, parseChangeReport, formatCard, formatMemoryBlock, digestStagesFor, WORKER_STAGE, SIDEKICK_STAGES } from '../lib/core/sidekick.js'
 import { decideAdvisorBudget } from '../lib/core/policy.js'
 import {
   noulQuestion, choiceQuestion, scoreQuestion, buildGuardQuestions, buildTierQuestion,
@@ -18,6 +18,7 @@ import {
   decideByThresholds, decisionKey, isDecisionStageEnabled, DECISION_STAGES,
 } from '../lib/core/decision.js'
 import { softParseSections } from '../lib/core/consult.js'
+import { pickCacheUsage, analyzeCacheLapses, formatCacheLapseReport, DEFAULT_CACHE_TTL_MS, DEFAULT_SHARE_THRESHOLD, DEFAULT_LAPSES_PER_HOUR_THRESHOLD, DEFAULT_MIN_LAPSES_FOR_VERDICT } from '../lib/core/cache-cost.js'
 
 // ---- rm -rf detection (including split flags) -----------------------------
 
@@ -239,9 +240,50 @@ test('an undeclared effort falls to the nearest declared level, never to the flo
   assert.equal(reconcileReasoningEffort('high', capped).effort, 'high')
   assert.equal(reconcileReasoningEffort('medium', capped).effort, 'medium')
   const offFirst = { efforts: [{ id: 'off' }, { id: 'high' }] }
-  assert.equal(reconcileReasoningEffort('low', offFirst).effort, 'off', 'the nearest lower level, no upgrade')
+  // Not 'off': disabling reasoning is not a downgrade level. minimax m3.1
+  // flash free (off|high|max) answers a disabled reasoning with 400, so a
+  // positive request upgrades to the lowest positive level instead.
+  const offFirstFit = reconcileReasoningEffort('low', offFirst)
+  assert.equal(offFirstFit.effort, 'high', 'never downgrade a positive effort to off')
+  assert.match(offFirstFit.reason, /using "high"/, 'the substitution is reported')
   assert.equal(reconcileReasoningEffort('off', capped).effort, 'low', 'below every declared level: the floor')
   assert.equal(reconcileReasoningEffort('minimal', { efforts: [{ id: 'high' }, { id: 'max' }] }).effort, 'high', 'an unknown id never invents a level')
+})
+
+test('reconcileReasoningEffort never disables reasoning for a positive request (minimax m3.1 flash free)', () => {
+  // Exact declared shape reported live: the model offers off|high|max while
+  // the cheap tier asks for 'low'. Picking 'off' made the endpoint answer
+  // 400 "Reasoning is mandatory for this endpoint and cannot be disabled".
+  const minimax = { efforts: [{ id: 'off' }, { id: 'high' }, { id: 'max' }] }
+  assert.equal(reconcileReasoningEffort('low', minimax).effort, 'high', 'a request below every positive level upgrades to the lowest one')
+  assert.equal(reconcileReasoningEffort('medium', minimax).effort, 'high', 'the nearest declared level at or below the request')
+  const max = reconcileReasoningEffort('max', minimax)
+  assert.equal(max.effort, 'max', 'a declared level is kept verbatim')
+  assert.equal(max.reason, null)
+  assert.equal(reconcileReasoningEffort('off', minimax).effort, 'off', 'an explicit off is still honoured')
+})
+
+test('reconcileReasoningEffort never turns an omitted effort into off', () => {
+  // A tier or sidekick stage configured without an explicit effort passes
+  // `undefined`: dsh-llm then leaves the choice to the adapter (or applies its
+  // own default). Fitting that onto the ladder's floor picked "off", and
+  // minimax m3.1 flash free rejects a disabled reasoning with 400
+  // "Reasoning is mandatory for this endpoint and cannot be disabled".
+  const minimax = { efforts: [{ id: 'off' }, { id: 'high' }, { id: 'max' }] }
+  assert.deepEqual(reconcileReasoningEffort(undefined, minimax), { effort: undefined, reason: null })
+  assert.deepEqual(reconcileReasoningEffort(null, minimax), { effort: undefined, reason: null })
+  assert.deepEqual(reconcileReasoningEffort('', minimax), { effort: undefined, reason: null })
+  assert.deepEqual(
+    reconcileReasoningEffort(undefined, { efforts: [{ id: 'high' }, { id: 'max' }] }),
+    { effort: undefined, reason: null },
+    'an omitted effort is not upgraded to a positive level either',
+  )
+  assert.deepEqual(
+    reconcileReasoningEffort(undefined, { efforts: [], defaultEffort: 'high' }),
+    { effort: undefined, reason: null },
+    'the declared model default is left to the adapter',
+  )
+  assert.equal(reconcileReasoningEffort('off', minimax).effort, 'off', 'an explicit off is still a disable request')
 })
 
 // ---- policy: escalation state machine -------------------------------------------
@@ -708,6 +750,28 @@ test('sidekick buildUser has a byte-stable prefix per stage', () => {
   }
 })
 
+test('sidekick buildUser puts the response contract before the task', () => {
+  const explore = sidekickSpec('explore').buildUser({ task: 'x' })
+  const snippetAt = explore.indexOf('Snippet: <path>')
+  const exploreTaskAt = explore.indexOf('Task: x')
+  assert.ok(snippetAt > 0, 'explore names the snippet contract: ' + explore)
+  assert.ok(exploreTaskAt > snippetAt, 'the snippet contract is part of the stable prefix, before the task')
+
+  for (const stage of ['implement', 'fix']) {
+    const user = sidekickSpec(stage).buildUser({ task: 'x' })
+    const taskAt = user.indexOf('Task: ')
+    assert.ok(taskAt > 0, stage + ' has a Task: line')
+    const touchedAt = user.indexOf('Touched files:')
+    const diffAt = user.indexOf('Diff summary:')
+    assert.ok(touchedAt >= 0 && touchedAt < taskAt, stage + ' contract lists the touched files before the task')
+    assert.ok(diffAt >= 0 && diffAt < taskAt, stage + ' contract asks for the diff summary before the task')
+  }
+  // implement embeds the task verbatim; fix labels it as a bug report, but
+  // both keep the contract above the variable part.
+  assert.ok(sidekickSpec('implement').buildUser({ task: 'x' }).includes('Task: x'))
+  assert.ok(sidekickSpec('fix').buildUser({ task: 'x' }).includes('Task: Bug report: x'))
+})
+
 test('sidekick buildUser appends cards and snippets after the stable prefix', () => {
   const user = sidekickSpec('implement').buildUser({
     task: 'write parser',
@@ -759,6 +823,42 @@ test('resolveSidekickTarget: stage override wins, else cheap tier', () => {
   assert.deepEqual(resolveSidekickTarget('implement', state), { provider: 'p-imp', model: 'm-imp' })
   assert.deepEqual(resolveSidekickTarget('fix', state), { provider: 'p-cheap', model: 'm-cheap', reasoningEffort: 'low' })
   assert.equal(resolveSidekickTarget('explore', { sidekick: {}, tiers: null }), null)
+})
+
+test('resolveSidekickFallbackTarget skips the primary route and walks implement -> fix -> main -> strong', () => {
+  const primary = { provider: 'p-cheap', model: 'm-cheap' }
+  const stateWith = (implement, fix, main, strong) => ({
+    tiers: { get: (name) => ({ main, strong })[name] || null },
+    sidekick: { explore: null, implement, fix },
+  })
+
+  // The configured implement route is the first distinct candidate.
+  assert.deepEqual(
+    resolveSidekickFallbackTarget('explore', stateWith({ provider: 'p-imp', model: 'm-imp', reasoningEffort: 'high' }, null, null, null), primary),
+    { provider: 'p-imp', model: 'm-imp', reasoningEffort: 'high' },
+  )
+
+  // A candidate matching the primary provider/model pair is skipped (effort ignored).
+  assert.deepEqual(
+    resolveSidekickFallbackTarget('explore', stateWith({ provider: 'p-cheap', model: 'm-cheap', reasoningEffort: 'max' }, { provider: 'p-fix', model: 'm-fix' }, null, null), primary),
+    { provider: 'p-fix', model: 'm-fix' },
+  )
+
+  // Unusable stage entries (missing model) fall through to the main tier.
+  assert.deepEqual(
+    resolveSidekickFallbackTarget('explore', stateWith(primary, { provider: 'p-cheap' }, { provider: 'p-main', model: 'm-main' }, { provider: 'p-strong', model: 'm-strong' }), primary),
+    { provider: 'p-main', model: 'm-main' },
+  )
+
+  // Only the strong tier is left distinct.
+  assert.deepEqual(
+    resolveSidekickFallbackTarget('explore', stateWith(primary, primary, null, { provider: 'p-strong', model: 'm-strong' }), primary),
+    { provider: 'p-strong', model: 'm-strong' },
+  )
+
+  // No distinct candidate at all.
+  assert.equal(resolveSidekickFallbackTarget('explore', stateWith(primary, null, null, null), primary), null)
+  assert.equal(resolveSidekickFallbackTarget('explore', { sidekick: {}, tiers: null }, primary), null)
 })
 
 test('parseExploreSnippets parses strict format, blocks, and JSON', () => {
@@ -814,6 +914,149 @@ test('parseChangeReport extracts touched files, summary and checks', () => {
   const j = parseChangeReport(json, true)
   assert.deepEqual(j.touchedFiles, ['src/a.ts'])
   assert.equal(j.diffSummary, 'x')
+})
+
+test('parseChangeReport tolerates heading, bold and Russian section labels', () => {
+  // A markdown heading with no colon, a bold label with one, and a localized
+  // label: models produce all three spellings of the same section.
+  const heading = [
+    '## Changed files',
+    'src/a.ts, src/b.ts',
+    'Diff summary: patched both modules.',
+    'Checks: npm test: pass',
+  ].join('\n')
+  const h = parseChangeReport(heading, true)
+  assert.deepEqual(h.touchedFiles, ['src/a.ts', 'src/b.ts'])
+  assert.equal(h.diffSummary, 'patched both modules.')
+  assert.ok(h.checks.includes('npm test'))
+
+  const bold = [
+    '**Touched files:**',
+    '- `lib/x.js`',
+    '**Diff summary:** tightened the parser.',
+    '**Checks:** eslint: clean',
+  ].join('\n')
+  const b = parseChangeReport(bold, true)
+  assert.deepEqual(b.touchedFiles, ['lib/x.js'])
+  assert.equal(b.diffSummary, 'tightened the parser.')
+  assert.ok(b.checks.includes('eslint'))
+
+  const russian = [
+    'Изменённые файлы:',
+    '- src/ru.ts',
+    'Diff summary: переписан парсер.',
+  ].join('\n')
+  const ru = parseChangeReport(russian, true)
+  assert.deepEqual(ru.touchedFiles, ['src/ru.ts'])
+  assert.equal(ru.diffSummary, 'переписан парсер.')
+})
+
+test('parseChangeReport strips markdown links, angle brackets and line anchors', () => {
+  const r = parseChangeReport('- [smoke.test.mjs](<tests/smoke.test.mjs#L10-L20>)', true)
+  assert.deepEqual(r.touchedFiles, ['tests/smoke.test.mjs'])
+})
+
+test('parseChangeReport reads backticked Windows and POSIX paths in prose', () => {
+  const win = 'D:\\dsh-tier-router\\tmp-smart-probe\\created.md'
+  const text = 'Updated `' + win + '` and `lib/core/sidekick.js:42`.'
+  const r = parseChangeReport(text, true)
+  assert.deepEqual(r.touchedFiles, [win, 'lib/core/sidekick.js'])
+  assert.ok(r.diffSummary.startsWith('Updated'), r.diffSummary)
+})
+
+test('parseChangeReport reads a fenced JSON block, including a same-line body', () => {
+  for (const fenced of [
+    '```json { "touchedFiles": ["src/a.ts"], "diffSummary": "json fence", "checks": "ok" } ```',
+    '```json\n{ "touchedFiles": ["src/a.ts"], "diffSummary": "json fence", "checks": "ok" }\n```',
+  ]) {
+    const r = parseChangeReport(fenced, true)
+    assert.deepEqual(r.touchedFiles, ['src/a.ts'], fenced)
+    assert.equal(r.diffSummary, 'json fence', fenced)
+    assert.equal(r.checks, 'ok', fenced)
+  }
+})
+
+test('parseChangeReport falls back to the first prose line for a missing summary', () => {
+  const text = [
+    'Touched files:',
+    '- src/x.ts',
+    'updated the parser to validate the request body',
+  ].join('\n')
+  const r = parseChangeReport(text, true)
+  assert.deepEqual(r.touchedFiles, ['src/x.ts'])
+  assert.equal(r.diffSummary, 'updated the parser to validate the request body')
+})
+
+test('parseChangeReport keeps a plain worker-ok response free of phantom files', () => {
+  assert.deepEqual(parseChangeReport('worker-ok', true), { touchedFiles: [], diffSummary: '', checks: '', ok: true })
+})
+
+test('parseExploreSnippets extracts a linked File block and described bullet', () => {
+  const block = [
+    '- File: [sidekick.js](<lib/core/sidekick.js#L10-L25>)',
+    '  Snippet: export function parseChangeReport(text, ok) {}',
+    '  Summary: parses change reports',
+  ].join('\n')
+  const b = parseExploreSnippets(block)
+  assert.equal(b.length, 1)
+  assert.equal(b[0].path, 'lib/core/sidekick.js')
+  assert.equal(b[0].lines, '10-25')
+  assert.ok(b[0].snippet.includes('parseChangeReport'))
+  assert.equal(b[0].summary, 'parses change reports')
+
+  const bullet = '- [sidekick.js](<lib/core/sidekick.js#L10-L25>) — parses reports'
+  const u = parseExploreSnippets(bullet)
+  assert.equal(u.length, 1)
+  assert.equal(u[0].path, 'lib/core/sidekick.js')
+  assert.equal(u[0].lines, '10-25')
+  assert.equal(u[0].summary, 'parses reports')
+  assert.equal(u[0].snippet, 'parses reports')
+})
+
+test('EXPLORE_TOOLS includes ops_read_files and the gate reason names the delegation path', () => {
+  assert.ok(EXPLORE_TOOLS.includes('ops_read_files'))
+  assert.ok(EXPLORE_TOOLS.includes('read'))
+  const denied = decidePlanExit({ planActive: true, explored: 0, minExplore: 2, advisorGate: true, consulted: false })
+  assert.equal(denied.action, 'deny')
+  assert.ok(denied.reason.includes('ops_read_files'), denied.reason)
+  assert.ok(denied.reason.includes('tier_sidekick'), denied.reason)
+  assert.equal(decidePlanExit({ planActive: true, explored: 2, minExplore: 2, advisorGate: false, consulted: false }).action, 'allow')
+})
+
+// ---- smart-mode read budget ------------------------------------------------
+
+test('SMART_MAIN_READ_BUDGET allows two direct read/search calls and denies the third', () => {
+  assert.equal(SMART_MAIN_READ_BUDGET, 2)
+  assert.deepEqual(decideSmartReadBudget(0, 'read', {}), { action: 'allow', nextReads: 1 })
+  assert.deepEqual(decideSmartReadBudget(1, 'grep', {}), { action: 'allow', nextReads: 2 })
+  for (const name of ['glob', 'read', 'ops_read_files']) {
+    const args = name === 'ops_read_files' ? { files: [{ path: 'a' }] } : {}
+    const denied = decideSmartReadBudget(2, name, args)
+    assert.equal(denied.action, 'deny', name + ' is denied on the third call')
+    assert.equal(denied.nextReads, 2, name + ' leaves the counter unchanged')
+    assert.match(denied.reason, />=3 files/, denied.reason)
+    assert.match(denied.reason, /tier_sidekick/, denied.reason)
+    assert.match(denied.reason, /stage "explore"/, denied.reason)
+  }
+})
+
+test('decideSmartReadBudget charges an ops_read_files batch its file count', () => {
+  const three = decideSmartReadBudget(0, 'ops_read_files', { files: [{ path: 'a' }, { path: 'b' }, { path: 'c' }] })
+  assert.equal(three.action, 'deny', 'one >=3-file batch is denied immediately')
+  assert.equal(three.nextReads, 0)
+  assert.match(three.reason, />=3 files/)
+
+  const twoAtOne = decideSmartReadBudget(1, 'ops_read_files', { files: [{ path: 'a' }, { path: 'b' }] })
+  assert.equal(twoAtOne.action, 'deny', '1 used + 2 files exceeds the budget of 2')
+  assert.equal(twoAtOne.nextReads, 1)
+
+  assert.deepEqual(decideSmartReadBudget(1, 'ops_read_files', { files: [{ path: 'a' }] }), { action: 'allow', nextReads: 2 })
+})
+
+test('decideSmartReadBudget ignores tools outside the explore set', () => {
+  assert.deepEqual(decideSmartReadBudget(0, 'tier_status', {}), { action: 'allow', nextReads: 0 })
+  assert.deepEqual(decideSmartReadBudget(2, 'tier_status', {}), { action: 'allow', nextReads: 2 })
+  assert.deepEqual(decideSmartReadBudget(2, 'write', {}), { action: 'allow', nextReads: 2 })
 })
 
 // ---- advisor budget -------------------------------------------------------
@@ -1070,4 +1313,167 @@ test('a pin or session mode of an inactive tier keeps the seed instead of downgr
   // A mode keyword is not a tier name and must keep working.
   assert.equal(resolveTierSpec({ sessionMode: 'auto', mode: 'auto', planActive: false, tiers: two }), 'cheap')
   assert.equal(resolveTierSpec({ sessionMode: 'off', mode: 'auto', tiers: two }), null)
+})
+
+// ---- cache-lapse telemetry (smart-mode prefix cache) ---------------------
+
+// One main-agent step whose prompt prefix is 1600 tokens (100 fresh + 1000
+// cache read + 500 cache write) and a 500-token cache write.
+const LAPSE_USAGE = { inputTokens: 100, cacheReadTokens: 1000, cacheWriteTokens: 500, outputTokens: 50 }
+const LAPSE_STEPS = [{ ts: 0 }, { ts: 400_000, usage: LAPSE_USAGE }]
+const LAPSE_WINDOW = [{ start: 10_000, end: 300_000 }]
+const LAPSE_TARIFFS = { prompt: 4, cacheRead: 0.2, cacheWrite: 5, completion: 20 }
+
+test('cache telemetry: defaults match the documented thresholds', () => {
+  assert.equal(DEFAULT_CACHE_TTL_MS, 300_000)
+  assert.equal(DEFAULT_SHARE_THRESHOLD, 0.05)
+  assert.equal(DEFAULT_LAPSES_PER_HOUR_THRESHOLD, 2)
+  assert.equal(DEFAULT_MIN_LAPSES_FOR_VERDICT, 3)
+})
+
+test('cache telemetry: no steps is insufficient data, never a crash', () => {
+  const analysis = analyzeCacheLapses([], [])
+  assert.equal(analysis.keptSteps, 0)
+  assert.equal(analysis.lapseCount, 0)
+  assert.equal(analysis.attributableLapseCount, 0)
+  assert.equal(analysis.lapsesPerHour, null)
+  assert.equal(analysis.verdict, 'insufficient-data')
+  assert.equal(analysis.recommendLongRetention, false)
+  assert.equal(analysis.estimatedRewriteCostUsd, null)
+  assert.deepEqual(analysis.lapses, [])
+  const lines = formatCacheLapseReport(analysis)
+  assert.ok(Array.isArray(lines))
+  assert.ok(lines.length > 0)
+  assert.ok(lines.every(function (line) { return typeof line === 'string' }))
+  assert.deepEqual(formatCacheLapseReport(null), ['cache telemetry: no data'])
+})
+
+test('cache telemetry: a gap past the ttl is a lapse, a child window makes it attributable', () => {
+  const analysis = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW)
+  assert.equal(analysis.keptSteps, 2)
+  assert.equal(analysis.childWindowCount, 1)
+  assert.equal(analysis.lapseCount, 1)
+  assert.equal(analysis.attributableLapseCount, 1)
+  assert.equal(analysis.estimatedRewriteTokens, 1600)
+  assert.equal(analysis.actualRewriteTokens, 500)
+  const lapse = analysis.lapses[0]
+  assert.equal(lapse.gapStartTs, 0)
+  assert.equal(lapse.gapEndTs, 400_000)
+  assert.equal(lapse.gapMs, 400_000)
+  assert.equal(lapse.overlapMs, 290_000)
+  assert.equal(lapse.attributable, true)
+  assert.equal(lapse.prefixTokens, 1600, 'the prefix is the SECOND step\'s input side')
+})
+
+test('cache telemetry: a lapse outside every child window is not attributable', () => {
+  const analysis = analyzeCacheLapses(LAPSE_STEPS, [])
+  assert.equal(analysis.lapseCount, 1)
+  assert.equal(analysis.attributableLapseCount, 0)
+  assert.equal(analysis.recommendLongRetention, false)
+  assert.equal(analysis.lapses[0].attributable, false)
+  assert.equal(analysis.lapses[0].overlapMs, 0)
+})
+
+test('cache telemetry: a gap inside the ttl is not a lapse', () => {
+  const analysis = analyzeCacheLapses([{ ts: 0 }, { ts: 100_000, usage: LAPSE_USAGE }], LAPSE_WINDOW)
+  assert.equal(analysis.lapseCount, 0)
+  assert.equal(analysis.attributableLapseCount, 0)
+  assert.equal(analysis.estimatedRewriteTokens, 0)
+})
+
+test('cache telemetry: unsorted steps analyze exactly like sorted ones', () => {
+  const sorted = [{ ts: 0 }, { ts: 400_000, usage: LAPSE_USAGE }]
+  const unsorted = [{ ts: 400_000, usage: LAPSE_USAGE }, { ts: 0 }]
+  const snapshot = JSON.stringify(unsorted)
+  const a = analyzeCacheLapses(sorted, LAPSE_WINDOW)
+  const b = analyzeCacheLapses(unsorted, LAPSE_WINDOW)
+  assert.deepEqual(b, a)
+  assert.equal(JSON.stringify(unsorted), snapshot, 'inputs are copied, never reordered in place')
+  // Unusable timestamps are dropped and counted, not fatal.
+  const mixed = analyzeCacheLapses([{ ts: 0 }, { ts: Number.NaN }, { ts: 'x' }, { ts: 400_000, usage: LAPSE_USAGE }], LAPSE_WINDOW)
+  assert.equal(mixed.skippedSteps, 2)
+  assert.equal(mixed.keptSteps, 2)
+  assert.equal(mixed.lapseCount, 1)
+})
+
+test('cache telemetry: tariffs price the re-write and its share of the session', () => {
+  const analysis = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { tariffs: LAPSE_TARIFFS })
+  assert.equal(analysis.tariffsApplied, true)
+  assert.equal(analysis.estimatedRewriteCostUsd, 1600 * 5 / 1e6)
+  assert.equal(analysis.actualRewriteCostUsd, 500 * 5 / 1e6)
+  assert.ok(analysis.estimatedSessionCostUsd > 0)
+  assert.equal(analysis.lapseShare, analysis.estimatedRewriteCostUsd / analysis.estimatedSessionCostUsd)
+  // A partial tariff block is unusable: no USD, token share instead.
+  const partial = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { tariffs: { prompt: 4, cacheRead: 0.2, cacheWrite: 5 } })
+  assert.equal(partial.tariffsApplied, false)
+  assert.equal(partial.estimatedRewriteCostUsd, null)
+  assert.equal(partial.actualRewriteCostUsd, null)
+  assert.equal(partial.estimatedSessionCostUsd, null)
+  assert.equal(partial.lapseShare, 1600 / partial.totalInputSideTokens)
+  assert.equal(partial.totalInputSideTokens, 1600)
+  // The priced report says dollars; the unpriced one does not.
+  assert.ok(formatCacheLapseReport(analysis).some(function (line) { return line.indexOf('~$') !== -1 }))
+  assert.ok(formatCacheLapseReport(partial).every(function (line) { return line.indexOf('~$') === -1 }))
+})
+
+test('cache telemetry: the verdict compares the lapse share against the threshold', () => {
+  const material = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { tariffs: LAPSE_TARIFFS, minLapsesForVerdict: 2 })
+  assert.equal(material.verdict, 'material')
+  const big = [{ ts: 0, usage: { inputTokens: 10_000_000 } }, { ts: 400_000, usage: LAPSE_USAGE }]
+  const negligible = analyzeCacheLapses(big, LAPSE_WINDOW, { tariffs: LAPSE_TARIFFS, minLapsesForVerdict: 2 })
+  assert.equal(negligible.verdict, 'negligible')
+  // A real lapse on too few observed steps stays insufficient data.
+  const thin = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { tariffs: LAPSE_TARIFFS })
+  assert.equal(thin.lapseCount, 1)
+  assert.equal(thin.verdict, 'insufficient-data')
+  const strict = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { tariffs: LAPSE_TARIFFS, minLapsesForVerdict: 2, shareThreshold: 0 })
+  assert.equal(strict.verdict, 'material')
+})
+
+test('cache telemetry: long retention is recommended from attributable lapses per hour', () => {
+  const base = 1_767_225_600_000
+  const steps = [0, 1_200_000, 2_400_000, 3_600_000].map(function (offset) {
+    return { ts: base + offset, usage: LAPSE_USAGE }
+  })
+  const hot = analyzeCacheLapses(steps, [{ start: base, end: base + 3_600_000 }])
+  assert.equal(hot.lapseCount, 3)
+  assert.equal(hot.attributableLapseCount, 3)
+  assert.equal(hot.lapsesPerHour, 3)
+  assert.equal(hot.recommendLongRetention, true)
+  // One attributable lapse is below the default evidence bar.
+  const cold = analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW)
+  assert.equal(cold.attributableLapseCount, 1)
+  assert.equal(cold.recommendLongRetention, false)
+  // No elapsed span means no rate, and therefore no recommendation.
+  const flat = analyzeCacheLapses([{ ts: 5, usage: LAPSE_USAGE }, { ts: 5, usage: LAPSE_USAGE }], [])
+  assert.equal(flat.lapsesPerHour, null)
+  assert.equal(flat.recommendLongRetention, false)
+})
+
+test('pickCacheUsage normalizes adapter token usage', () => {
+  assert.equal(pickCacheUsage(null), null)
+  assert.equal(pickCacheUsage(undefined), null)
+  assert.deepEqual(pickCacheUsage({}), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.deepEqual(
+    pickCacheUsage({ inputTokens: -5, cacheReadTokens: 'x', cacheWriteTokens: Number.NaN, outputTokens: Number.POSITIVE_INFINITY }),
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  )
+  assert.deepEqual(
+    pickCacheUsage({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40, totalTokens: 9999, reasoningTokens: 7 }),
+    { inputTokens: 10, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 40 },
+  )
+})
+
+test('cache telemetry: the report only hints at long retention when the evidence supports it', () => {
+  const base = 1_767_225_600_000
+  const steps = [0, 1_200_000, 2_400_000, 3_600_000].map(function (offset) {
+    return { ts: base + offset, usage: LAPSE_USAGE }
+  })
+  const hot = formatCacheLapseReport(analyzeCacheLapses(steps, [{ start: base, end: base + 3_600_000 }]), { usageFields: 'reported' })
+  assert.ok(hot.some(function (line) { return line.indexOf('long') !== -1 }), 'a hint mentions long retention')
+  const cold = formatCacheLapseReport(analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW))
+  assert.ok(cold.every(function (line) { return line.indexOf('long') === -1 }), 'no hint without evidence')
+  // The TTL is rendered in whole minutes.
+  const ttl = formatCacheLapseReport(analyzeCacheLapses(LAPSE_STEPS, LAPSE_WINDOW, { ttlMs: 600_000 }), { ttlMs: 600_000 })
+  assert.ok(ttl.some(function (line) { return line.indexOf('10 min') !== -1 }))
 })

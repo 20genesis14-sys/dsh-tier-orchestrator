@@ -98,7 +98,7 @@ sequenceDiagram
 - **subagent 分层**：`tier_worker` 按档派发子代理（`subagents.startActivation` +
   `agentOptions` 注入模型），支持 `outputSchema`（结构化结果）、`agentPreset`
   （按其他预设组合 worker——替代上游已删除的 `persona`/`toolFilter`）、
-  `maxDepth`（深度上限）、`background`（jobs 后台执行，owner 为 SessionId）；`/tier subagent
+  `background`（jobs 后台执行，owner 为 SessionId）；`/tier subagent
   <inherit|cheap|strong>` 也会在普通 `subagent` 与 `subagent_fork` 的首个请求前应用
   对应路由。自动升级始终受 TTL 限制，不会永久覆盖 worker 显式选择的档位。
 - **难度升级规则注入**：向系统提示词注入升级门（歧义未消、架构 / 安全 / 数据完整性、
@@ -107,14 +107,18 @@ sequenceDiagram
    不直接改文件——`write`/`edit`/`multi_edit`/`patch` 会被守卫拒绝。工作委托给
    `tier_sidekick` 三阶段：`explore`（紧凑文件片段）、`implement`（代码/测试/lint）、
    `fix`（修 bug）。每阶段可用独立模型（`/tier set sidekick-<stage> <provider> <model>
-   [effort]`），默认为低成本档。
+   [effort]`），默认为低成本档。子代理挂载精简 `tiered-sidekick` 预设（文件+搜索+
+   终端+记忆，而非父级完整工具集）；`sidekickAgentPreset` /
+   `/tier set sidekick-preset` 可改，`inherit` 恢复旧行为；预设无法挂载时自动退回
+   父级组合重试。
 - **顾问每轮预算**：`tier_advisor` 在每轮用户对话里免费允许 `advisorMaxCallsPerTurn`
    次（默认 2）；下一次通过 approval 通道请求确认（30 秒超时），未获确认则失败关闭。
    新用户消息会重置预算。`forceTierOnExplicitModel`（默认关）让显式模型的子代理
    也按档位规则路由，而不是保留种子路由。
 - **TurboQuant 4-bit 片段缓存**：本地代码向量化（d=512，Signed Feature Hashing + FWHT），
    以 4-bit 向量（每条 256 字节）持久化到 `.dsh-turbovec-cache.json`
-   （走 `ctx.fs`，不可写时退回内存）。`tier_sidekick` 检索片段并注入提示词。
+   （走 `ctx.fs`，不可写时退回内存）。`tier_sidekick` 检索片段并注入提示词；
+   `tier_recall` 让调用方直接执行同一检索（不派生子代理，无模型调用）。
    `/tier cache status|clear|search <query>`。
 - **决策模型阶段（Jev / System One / OpenRouter Decisions）**：可选的
   `lib/dsh/decisions.js` 客户端向 OpenRouter Decisions API（`/api/alpha/decisions`，
@@ -160,10 +164,13 @@ dsh plugin --profile web add .
 #    “Tier routing” 设置表单（命名空间由 host 提供，需先用任一预设跑过一个会话）。
 ```
 
-提供两个预设：
+提供三个预设：
 
 - **`tiered`** — 标准组合：完整 DSH 工具集 + 分档路由。
 - **`tiered-minimal`** — Pi 式极简提示（见 [极简预设](#极简预设tiered-minimal)）。
+- **`tiered-sidekick`** — `tier_sidekick` / `tier_worker` 子代理默认挂载的精简组合
+  （见 [Sidekick 预设](#sidekick-预设tiered-sidekick)）；仅供委派子代理使用，
+  不要作为会话预设选择。
 
 卸载：`dsh plugin --profile web remove dsh-tier-orchestrator`，下次启动后 host 条目与
 `tiered` preset 一并消失。
@@ -178,7 +185,7 @@ dsh plugin --profile web add .
    - 两个 tier 各自的 provider/model/effort
    - `diag:` 行实时计数器
 4. 该会话里必须能调用 `tier_status` / `tier_route` / `tier_configure` /
-   `tier_advisor` / `tier_review` / `tier_worker` / `tier_sidekick` 七个工具。
+   `tier_advisor` / `tier_review` / `tier_recall` / `tier_worker` / `tier_sidekick` 八个工具。
 5. 廉价档执行期间，高危命令（如 `rm -rf`、`sudo …`）必须被守卫拒绝并给出升级提示。
 6. `/tier set strong <provider> <model> [effort]` 必须回复 `Saved to
    tier-router settings.` 且重启后仍然生效。
@@ -194,7 +201,8 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
   无 workspace 指令预算（`agent-instructions`）。
 - **工具**：Pi 风格的 `read` / `write` / `edit`（由本插件注册，schema 精简，
   无 fs-observation-policy——编辑不要求先读）加平台终端——POSIX 用 `bash`，
-  Windows 用 `pwsh`——描述仅一行。本插件自己的工具里只声明 `tier_worker`：
+  Windows 用 `pwsh`——描述仅一行。本插件自己的工具里只声明 `tier_worker` 和
+  `tier_recall`（recall 是本地读路径，极简会话同样保留记忆访问）：
   每个已注册工具都会把定义带进每个请求，因此另外七个 `tier_*` 工具
   （`tier_status`、`tier_advisor`、`tier_review`、`tier_route`、
   `tier_configure`、`tier_escalate_effort`、`tier_sidekick`）只在 standard
@@ -211,6 +219,24 @@ Pi 式极简提示，适合想要最精简 agent 的用户：
 status、sidekick 工具只在 standard 预设存在。被排除的能力并未丢失：在 `tiered`
 预设的会话中使用，或在极简会话里用 `tier_worker` + `agentPreset: tiered` 派生
 带完整工具的子代理。预设在新会话创建时选择；已有会话保留原预设（DSH 行为）。
+
+### Sidekick 预设（`tiered-sidekick`）
+
+`tier_sidekick` 子代理默认挂载的精简组合——不再让每个子请求都背上父级
+40+ 个工具定义：
+
+- **Persona**：一行委派专用提示；**工具**：Pi 风格 `read`/`write`/`edit`、
+  `glob`/`grep`（`tool-fs-search`，explore 阶段需要搜索）、平台终端、
+  `tier_worker`、`tier_recall`；保留 `agent-instructions`（AGENTS.md，
+  16 KiB 上限）与上下文压缩。
+- 不含 `dsh-tool-fs`（与极简 fs 工具重名）、plan 模式、subagents/workflow、
+  jobs/schedule、goal、todo、web、skills、ask-user。
+- 选择顺序：调用参数 `agentPreset` 优先，其次是 `sidekickAgentPreset`
+  （默认 `tiered-sidekick`；`/tier set sidekick-preset <id|inherit>`），
+  否则继承父级预设。`workerAgentPreset` 对 `tier_worker` 同理（默认 `inherit`）。
+  预设仅在 spawn provider 上生效；预设无法挂载时会先用父级组合重试一次。
+- profile 级全局行（dsh-ops、web 插件等）会叠加在任何预设之上，因此子代理的
+  确切工具清单取决于 profile——预设只能精简其自身范围内的部分。
 
 ## 使用
 
@@ -237,6 +263,8 @@ status、sidekick 工具只在 standard 预设存在。被排除的能力并未�
 # 各档模型完全由插件配置决定；DSH 会话选择器不参与路由
 /tier set sidekick-<explore|implement|fix> <provider> <model> [effort] | reset
                                             # smart 模式各阶段的 sidekick 模型（留空 = 低成本档）
+/tier set sidekick-preset <id|inherit>      # sidekick 子代理挂载的预设（默认 tiered-sidekick）
+/tier set worker-preset <id|inherit>        # tier_worker 子代理挂载的预设（默认 inherit）
 /tier subagent [spawn|fork] <inherit|cheap|strong|main|caller|capped> # 子代理路由；caller 仅用于 fork，capped 不超过主档
 /tier subagent force-explicit <on|off>      # 显式模型的子代理也按档位规则路由（默认关）
 /tier review <评审焦点>                       # 强档模型评审
@@ -271,7 +299,7 @@ Tiered model routing
 | `tier_route` | 设置**本会话**档位（strong/cheap/auto/delegated/smart/off，可选持久化） |
 | `tier_configure` | 重配任意档位的 provider/model/effort 与 subagent 策略 |
 | `tier_sidekick` | smart 模式委托：按阶段（`explore`/`implement`/`fix`）派生子代理，注入 TurboQuant 缓存片段 |
-| `tier_worker` | 按档派发子代理执行有界任务包；支持 outputSchema / agentPreset / maxDepth / background |
+| `tier_worker` | 按档派发子代理执行有界任务包；支持 outputSchema / agentPreset / background |
 | `tier_escalate_effort` | 弱档思考强度上调一档（low → medium → high → max），不超过模型声明的上限 |
 | `tier_status` | 只读诊断：全局与本会话档位、升级状态、监听器计数器、生效档位 |
 
@@ -328,7 +356,7 @@ harness 适配层（服务探测、路由 seam 策略、subagent/jobs 适配、s
 | 守卫矩阵（auto/strong/off） | ✅ auto 拒 / strong 放行 / off 放行并恢复默认档 / 恢复 auto 拒 |
 | 守卫加固（拆分参数、前缀 rm、散文、.env 白名单、大小写） | ✅ 7/7 实测通过 |
 | 工具正向 | ✅ advisor/review 真调强档；route 四种模式；configure 改档；worker 在 spawn 与 fork 两个 provider 上完成 |
-| worker 新参数 | ✅ outputSchema 结构化结果、agentPreset 透传、maxDepth 拒绝超限、jobs 后台（toolFilter/persona 为 0.2 之前 API 下的实测，上游已删除） |
+| worker 新参数 | ✅ outputSchema 结构化结果、agentPreset 透传、jobs 后台（toolFilter/persona 为 0.2 之前 API 下的实测，上游已删除） |
 | 工具反向用例 | ✅ 非法 provider 拒绝、非法 subagent provider 报错 |
 | subagent 分层 | ✅ 弱档跑 flash、强档跑 pro（子代理日志与返回值证实） |
 | 失败升级事件路径 | ✅ `agent/error` 真实触发、计数器自增、off 模式正确跳过 |

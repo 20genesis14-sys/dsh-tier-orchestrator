@@ -4,6 +4,53 @@ All notable changes to dsh-tier-orchestrator are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`tier_recall` — direct memory access for the calling agent.** A local
+  vector search over the project TurboQuant cache (`query`, optional
+  `kind: "digest"` for stage-outcome cards, `k` 1-8) rendered as a short hit
+  list. No subagent spawn and no model call, so recalling what earlier turns
+  and sessions already inspected costs nothing and keeps the Main Agent's
+  context clean. Registered in every prompt mode — pi keeps it too, since
+  recall is a read path like `read`/`grep`, not delegation. Calls are counted
+  in `diag.recallCalls` (`/tier status`), the prompt section names the tool,
+  and the smart-mode read-budget denial points at it before delegating a
+  re-read.
+- **`tiered-sidekick` — a slim agent preset for delegation children.**
+  `tier_sidekick` children used to inherit the parent's full preset
+  (43+ tools on a loaded profile) even though a stage needs only files,
+  search, a shell, and memory. The new preset row mounts persona-lite, the
+  platform terminal, `tool-fs-search`, bounded `agent-instructions`,
+  compaction, and the agent row in pi mode (minimal fs tools,
+  `tier_worker`, `tier_recall`, and the child tool-trace listeners). The
+  volatile `sidekickAgentPreset` field (default `tiered-sidekick`; a call's
+  own `agentPreset` argument or `inherit` overrides it) and the symmetric
+  `workerAgentPreset` (default `inherit`) select the child composition on
+  the spawn provider; `/tier set sidekick-preset|worker-preset <id|inherit>`
+  writes them. When the host cannot mount the preset the spawn retries once
+  on the parent's composition before route fallback. Profile-global rows
+  (dsh-ops, web plugins) still mount on top of any preset — the child's
+  exact roster stays profile-dependent, only the preset-scoped share is
+  slimmed.
+
+### Fixed
+
+- **A positive reasoning effort is never reconciled down to `off`.**
+  `reconcileReasoningEffort` treated `off` as the bottom rung of the ladder, so
+  a cheap tier configured with `low` on a model that declares only
+  `off|high|max` (minimax m3.1 flash free) sent a disabled reasoning and every
+  step failed with `400 Reasoning is mandatory for this endpoint and cannot be
+  disabled`. `off` now means "no reasoning": a positive request is kept when
+  declared, else takes a positive `defaultEffort`, else the nearest declared
+  level at or below it, else the lowest declared positive level; only a model
+  that declares nothing but `off` still resolves to `off`. An explicit `off`
+  request and a model without reasoning metadata behave as before.
+- **`maxDepth` removed from `tier_worker`.** The host ignores the value (a
+  child spawned with `maxDepth: 2` still reports "current 1, maximum 1"), so
+  passing it only promised a cap that was never applied. The option is gone
+  from the tool description, the argument schema, the subagent adapter and the
+  docs; use the host's own delegation-depth setting instead.
+
 ### Fixed (code review pass)
 
 The full pass log — method, every finding with its disposition, rejected

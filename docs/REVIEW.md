@@ -193,3 +193,29 @@ plain fakes). Existing suites gained regression cases for every finding marked
       takes seconds).
 - [ ] If a new mode or policy action is added, extend `resolveTierSpec`'s
       precedence and its pure tests together.
+
+---
+
+## 4. Decision record — cache telemetry [Unreleased]
+
+Scope: the prompt-cache lapse report behind `/tier cache status`. Packet A is
+the pure analysis (`lib/core/cache-cost.js`); packet B is the adapter
+(`lib/dsh/cache-telemetry.js`), the `index.js` wiring, the smoke cases and the
+`ARCHITECTURE.md` §14 section. Nothing here changes routing.
+
+| # | Decision | Rationale |
+| --- | --- | --- |
+| D1 | **Telemetry first**: a passive, read-only `session/event` listener folds `assistant/message` timestamps into a bounded per-agent `WeakMap` timeline | The evidence already flows through the host, so the report costs **zero extra LLM spend and zero request changes**. It also degrades honestly: no observed events, no claim. |
+| D2 | **R4 = recommend only**: the report may print one `cacheRetention: 'long'` hint, gated on `cacheMinLapses` attributable lapses and `cacheLapsesPerHourThreshold` | The plugin cannot act on the advice, so it must not imply it did. Both thresholds are config fields, so the gate is tunable, not baked into the wording. |
+| D3 | Rejected: **keep-alive pings** while a child runs | The plugin cannot initiate an LLM request (only answer one the agent already made) — and a ping would be billed, for a cache entry the user did not ask to keep warm. |
+| D4 | Rejected: **per-request `cacheRetention` / `cache_control` injection** | The field lives below this plugin's waterfall reach: `agent/request` rewrites provider/model/effort, not the provider-side cache block. An unverified write there would be a silent request mutation; the honest move is a recommendation applied in the user's own profile config. |
+| D5 | **Child windows are timed in the handler** (`tier_sidekick` `attemptOn`, `tier_worker` `settleRun`), never folded from events | A child ran its own session, so the parent sees no event for the window; and a child's `assistant/message` steps must not be recorded into the main agent's timeline (the listener skips `isChildAgent`). `Date.now()` stays in `index.js`, keeping `core/` clock-free. |
+| D6 | Four **flat** tariff fields (`cacheTariffPrompt` / `CacheRead` / `CacheWrite` / `Completion`, `-1` = not configured) instead of one nested object | Every durable field in this plugin is flat, so the settings page and `applyPersisted` handle it like the rest; the all-four-or-none rule stops a partial block from half-pricing a session (the report then counts tokens, not dollars). |
+
+Verification: `npm test` **366 pass, 0 fail**; `npm run check` OK on 22 files
+(the new `lib/dsh/cache-telemetry.js` included). New smoke cases: "cache
+telemetry: main-agent steps and a past-ttl gap reach `/tier cache status`",
+"cache telemetry: an empty timeline and a usage-less step degrade honestly",
+"cache telemetry: child-session steps are never recorded on the main
+timeline", "cache telemetry: sidekick and worker child windows are attributed
+to the caller".

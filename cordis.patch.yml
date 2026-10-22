@@ -260,3 +260,90 @@
             config:
               plane: agent
               promptMode: pi
+
+# ── Row 4 — `preset-tiered-sidekick`: slim delegation preset for
+# tier_sidekick / tier_worker children. The preset-scoped roster stays
+# minimal — Pi-style read/edit/write (this plugin), glob/grep (fs-search),
+# the platform terminal, AGENTS.md instructions, compaction, and the agent
+# row (which adds tier_worker + tier_recall and mounts the child tool-trace
+# listeners). Profile-global rows (e.g. dsh-ops) still mount on top — no
+# preset can fence those; on a clean profile the child carries ~9 tools
+# instead of the full parent roster.
+- insert:
+    - id: preset-tiered-sidekick
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: tiered-sidekick
+        order: 25
+        description: 'slim delegation preset for tiered sidekick/worker children (fs + search + shell + memory only)'
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: You are a delegated coding sidekick. Do the task packet, then report it compactly.
+              complete: true
+              includeRuntimeContext: false
+          - id: persistent-shell
+            name: cordis:group
+            group: true
+            isolate:
+              terminals: true
+            config:
+              - id: pty
+                name: '@deepseek-ai/dsh-terminal'
+              - id: terminal-bash
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+              - id: persistent-bash
+                name: '@deepseek-ai/dsh-tool-bash-persistent'
+                disabled: !!js process.platform === 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: Run commands in a bash shell in the current working directory.
+              - id: terminal-pwsh
+                name: '@deepseek-ai/dsh-terminal-bash'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  shellDialect: pwsh
+                  timeoutMs: 300000
+              - id: persistent-pwsh
+                name: '@deepseek-ai/dsh-tool-pwsh-persistent'
+                disabled: !!js process.platform !== 'win32'
+                config:
+                  timeoutMs: 300000
+                  description: Run commands in a PowerShell shell in the current working directory.
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 16384
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          # ── tiered model routing (agent plane) ─────────────────────────
+          # Pi mode: minimal read/edit/write tools + tier_worker/tier_recall +
+          # the listeners that trace child tool calls into the cache.
+          - id: tier-routing-agent
+            name: dsh-tier-orchestrator
+            config:
+              plane: agent
+              promptMode: pi
