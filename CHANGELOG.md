@@ -2,6 +2,28 @@
 
 All notable changes to dsh-tier-orchestrator are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **`tier_multi` — read-only review swarm (multi-agent stage 1).** Starts up
+to 6 reviewer subagents in parallel with different focuses on a shared
+goal/evidence/diff and aggregates their `APPROVE | NEEDS-CHANGES | BLOCKED`
+verdicts. Reviewers mount the new `tiered-review` preset (search + read +
+recall only: no shell, write/edit, subagents or plan mode) and run the plugin
+in `promptMode:'review'`, whose child-scoped `tools/pre-execute` listener
+denies file mutations, shells, recursive delegation and routing changes even
+if a profile-global row adds tools on top. This matters because DSH's
+`tools/pre-execute` dispatch is agent-scoped: a parent listener never sees a
+child's calls. The plugin refuses an unmountable or `inherit` reviewer preset
+rather than falling back to the parent's write toolset. `background:true`
+returns a run id; `/multi status|wait|cancel` controls it. Children also use
+reserved DSH child ids (`startActivation.childId`) as a second-line pin. This
+stage deliberately has no worktrees, diff collection or apply; it is the safe
+foundation for the later parallel-writer stage. New pure module
+`lib/core/multi.js`, adapter `lib/dsh/parallel.js`, `cwd`/`childId`
+pass-through in `lib/dsh/subagents.js`, and the `tiered-review` preset row.
+
 ## [0.11.0] - 2026-10-23
 
 ### Added
