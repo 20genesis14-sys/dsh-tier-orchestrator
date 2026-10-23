@@ -2,7 +2,7 @@
 
 All notable changes to dsh-tier-orchestrator are documented here.
 
-## [Unreleased]
+## [0.11.0] - 2026-10-23
 
 ### Added
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-tier-orchestrator",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "type": "module",
   "description": "Tiered model routing for DeepSeek Harness (>= 0.2): a strong tier for planning/architecture/review, a cheap tier for implementation, plan-mode-aware auto routing on the agent/request seam, per-tier model fallback chains, task-intensity reasoning effort, advisor/review consultations, a high-impact escalation guard, failure auto-escalation, durable host-entry configuration, and subagent tiering.",
   "keywords": [
